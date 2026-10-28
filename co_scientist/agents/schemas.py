@@ -60,6 +60,17 @@ RECORD_HYPOTHESIS_TOOL: dict[str, Any] = {
                 "type": "array", "items": {"type": "string"},
                 "description": "Hypothesis IDs this one descends from (Evolution only).",
             },
+            "protein_design_request": {
+                "type": "object",
+                "description": "Optional request only when the researcher supplied a complete local official AlphaProtein Novo manifest.",
+                "properties": {
+                    "manifest_path": {"type": "string"},
+                    "output_dir": {"type": "string"},
+                    "mode": {"type": "string", "enum": ["validate", "mock", "real"]},
+                    "rationale": {"type": "string"},
+                },
+                "required": ["manifest_path", "output_dir", "mode"],
+            },
         },
         "required": [
             "title", "statement", "mechanism",
@@ -218,3 +229,16 @@ RECORD_RESEARCH_PLAN_TOOL: dict[str, Any] = {
         "required": ["objective", "preferences", "idea_attributes"],
     },
 }
+
+
+# Optional annotations preserve compatibility with existing stored artifacts.
+# These are model judgments; deterministic quote checks are recorded separately.
+_EVIDENCE_FIELDS = {
+    "claim": {"type": "string", "description": "The specific claim this citation relates to."},
+    "relation": {"type": "string", "enum": ["supports", "contradicts", "context", "uncertain"],
+                 "description": "Relation to the hypothesis. Use uncertain if applicability is unverified."},
+    "support_level": {"type": "string", "enum": ["direct", "indirect", "background", "unknown"]},
+    "scope": {"type": "string", "description": "Source study conditions: DNA/RNA, organism, pore chemistry and basecaller when reported. State unknowns."},
+}
+for _tool, _field in ((RECORD_HYPOTHESIS_TOOL, "citations"), (RECORD_REVIEW_TOOL, "evidence")):
+    _tool["input_schema"]["properties"][_field]["items"]["properties"].update(_EVIDENCE_FIELDS)

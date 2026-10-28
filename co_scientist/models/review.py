@@ -35,10 +35,10 @@ class AssumptionCheck(BaseModel):
 
 
 class ReviewScores(BaseModel):
-    novelty: float | None = None         # 0..1
-    correctness: float | None = None
-    testability: float | None = None
-    feasibility: float | None = None
+    novelty: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False, strict=True)
+    correctness: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False, strict=True)
+    testability: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False, strict=True)
+    feasibility: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False, strict=True)
 
 
 class Review(BaseModel):

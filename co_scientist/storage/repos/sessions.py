@@ -14,7 +14,7 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-async def insert(conn: aiosqlite.Connection, s: Session) -> None:
+async def insert(conn: aiosqlite.Connection, s: Session, *, commit: bool = True) -> None:
     await conn.execute(
         """INSERT INTO sessions(
                id, created_at, updated_at, status, research_goal, research_plan,
@@ -37,7 +37,8 @@ async def insert(conn: aiosqlite.Connection, s: Session) -> None:
             s.final_overview,
         ),
     )
-    await conn.commit()
+    if commit:
+        await conn.commit()
 
 
 async def fetch(conn: aiosqlite.Connection, session_id: str) -> Session | None:

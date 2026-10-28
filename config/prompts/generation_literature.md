@@ -22,3 +22,9 @@ Literature review and analytical rationale (chronologically ordered, beginning w
 {{ articles_with_reasoning }}
 
 When you are ready, call the `record_hypothesis` tool with your final answer. The tool's `statement` field is the one-sentence hypothesis; `mechanism` is the detailed causal story; `entities` lists specific named actors; `anticipated_outcomes` describes what would be observed if true; `novelty_argument` explains what is new relative to the cited work; `citations` must reference articles you actually read above (URL + excerpt for each).
+
+Only when the researcher explicitly supplied a complete local AlphaProtein Novo
+manifest may you add `protein_design_request` with that exact manifest path,
+output directory, and mode (`validate`, `mock`, or `real`). Never invent a
+manifest path, catalytic motif, ligand, reaction, or model path. Ordinary
+research questions must omit this field.

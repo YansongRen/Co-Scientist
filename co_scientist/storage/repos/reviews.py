@@ -9,6 +9,35 @@ import aiosqlite
 from ...models import Review, ReviewScores
 
 
+async def best_for_reasoning(cfg, conn, hypothesis_id: str) -> str | None:
+    """Exclude simulation-derived prose as well as raw simulated metrics."""
+    candidates = await reasoning_reviews(cfg, conn, await list_for_hypothesis(conn, hypothesis_id))
+    return candidates[0].body if candidates else None
+
+
+async def reasoning_reviews(cfg, conn, candidates: list[Review]) -> list[Review]:
+    from ..artifacts import read_json
+    from . import scientific_evidence
+    result = []
+    for review in candidates:  # newest first, rather than highest novelty score
+        attached = await scientific_evidence.list_for_hypothesis(conn, review.hypothesis_id)
+        uncertain_legacy = any(row.status == "mock" for row in attached)
+        try:
+            artifact = await read_json(cfg, review.artifact_path)
+            record = artifact.get("record", {})
+        except (OSError, ValueError, TypeError):
+            if uncertain_legacy:
+                continue
+            record = {}
+        statuses = record.get("scientific_evidence_status", [])
+        if "mock" in statuses or review.kind == "simulation":
+            continue
+        if uncertain_legacy and not statuses:
+            continue  # cannot certify the origin of an older review
+        result.append(review)
+    return result
+
+
 async def insert(conn: aiosqlite.Connection, r: Review) -> bool:
     cur = await conn.execute(
         """INSERT OR IGNORE INTO reviews(

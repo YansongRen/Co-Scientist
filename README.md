@@ -25,6 +25,32 @@ This is an independent re-implementation in Python on top of pluggable LLM provi
 
 > [`docs/BENCH_RESULTS.md`](docs/BENCH_RESULTS.md) — every cross-model bench ever run on this code, with per-candidate Elo, every hypothesis produced, gold-set hits, and direct file pointers. Auto-generated from the bench DB.
 
+
+## 本版本：科研网页与离线预览
+
+本仓库包含双模式科研入口、Research Scoping Assistant、可配置预算/时间/Token、文档与图片上传，以及 Co-Scientist × AlphaProtein Novo 的计算证据集成。
+
+**仓库不包含 API Key、`.env`、本地配置、数据库、上传材料或本机运行记录。** API 适配代码保留；真实模型需要使用者在服务端自行配置。默认离线预览不调用收费模型、不启动正式科研 Agent 或真实蛋白质计算。
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+python scripts/scoping_preview.py --port 7883
+```
+
+打开 <http://127.0.0.1:7883/#new>。此网页依赖 Python 后端，不能仅以静态 HTML 部署。离线模式用于体验流程；真正执行科研任务请按服务端配置说明启动常规服务。
+
+- [引导式研究、任务书、附件与预算](docs/research-scoping.md)
+- [部署与数据持久化](docs/deployment.md)
+- [阿里云与 systemd 部署](docs/deployment-aliyun.md)
+- [AlphaProtein Novo 适配与证据边界](docs/alphaprotein-novo-integration.md)
+
+本次上传前本地回归：**505 passed**；未进行新的付费 LLM、APN/AlphaFold 或实验验证。Mock 测试不能证明科研效果。
+
+---
+
+
 ## Contents
 
 - [Architecture](#architecture)

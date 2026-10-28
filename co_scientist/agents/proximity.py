@@ -49,6 +49,7 @@ class ProximityAgent(BaseAgent):
         to_embed = [h for h in hyps if h.id not in existing_for_model]
 
         if to_embed:
+            await self._activity(task, "计算假设向量并更新索引", n_items=len(to_embed), model=embedder.model)
             texts = [(h.title + "\n\n" + h.summary) for h in to_embed]
             vecs = await embedder.embed(texts)
             for h, v in zip(to_embed, vecs, strict=True):
@@ -69,6 +70,7 @@ class ProximityAgent(BaseAgent):
         n_indexed = store.n
         clusters_set = False
         if rebuild and n_indexed >= 3:
+            await self._activity(task, "按相似性重新聚类", n_items=n_indexed)
             try:
                 clusters = await self._cluster(store, threshold=self.deps.cfg.vectors.cluster_threshold)
             except Exception as e:
@@ -80,6 +82,7 @@ class ProximityAgent(BaseAgent):
                 clusters_set = True
                 log.info("proximity_clustered", n_clusters=len(set(clusters.values())), n_indexed=n_indexed)
 
+        await self._activity(task, "相似性索引更新完成", n_items=n_indexed)
         return TaskResult(
             kind="proximity_updated",
             extra={"n_indexed": n_indexed, "n_new": len(to_embed), "clustered": clusters_set},

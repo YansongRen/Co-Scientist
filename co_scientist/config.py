@@ -25,6 +25,8 @@ DEFAULT_PROVIDER = "openrouter"
 
 
 class RunCfg(BaseModel):
+    research_mode: Literal["standard", "lightweight"] = "standard"
+    target_molecule: Literal["unspecified", "DNA", "RNA"] = "unspecified"
     concurrency: int = 4
     max_ideas: int = 60
     max_matches_per_idea: int = 12
@@ -67,6 +69,7 @@ class VectorsCfg(BaseModel):
 
 
 class RankingCfg(BaseModel):
+    lightweight_max_pair_matches: int = Field(default=3, ge=1, le=20)
     k_factor_new: int = 32
     k_factor_warm: int = 16
     elo_initial: int = 1200
@@ -206,6 +209,24 @@ class CodeExecCfg(BaseModel):
     local_mem_mb: int = 512
 
 
+class AlphaProteinNovoCfg(BaseModel):
+    """Local paths and safety gates for the optional AP Novo adapter."""
+
+    enabled: bool = False
+    allow_real_runs: bool = False
+    repo_path: str = ""
+    python_executable: str = ""
+    apn_model_dir: str = ""
+    af3_model_dir: str = ""
+    timeout_seconds: int = 86_400
+    max_design_iterations: int = 3
+    max_design_tasks_per_session: int = 10
+    require_real_run_approval: bool = True
+    execution_backend: Literal["local", "remote"] = "local"
+    remote_worker_url: str = ""
+    remote_poll_seconds: int = 10
+
+
 class SafetyCfg(BaseModel):
     enable_classifier: bool = True
     enable_citation_verifier: bool = True
@@ -226,6 +247,7 @@ class OpenAIProviderCfg(BaseModel):
     """
 
     base_url: str | None = None
+    extra_body: dict[str, Any] = Field(default_factory=dict)
 
 
 class AnthropicProviderCfg(BaseModel):
@@ -355,19 +377,45 @@ class Secrets(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    ANTHROPIC_API_KEY: str = ""
-    OPENAI_API_KEY: str = ""
-    OPENROUTER_API_KEY: str = ""
-    GEMINI_API_KEY: str = ""
-    GROQ_API_KEY: str = ""
-    TOGETHER_API_KEY: str = ""
-    MISTRAL_API_KEY: str = ""
-    OLLAMA_API_KEY: str = ""
-    VOYAGE_API_KEY: str = ""
-    TAVILY_API_KEY: str = ""
-    BRAVE_API_KEY: str = ""
-    NCBI_API_KEY: str = ""
-    OPENALEX_API_KEY: str = ""
+    ANTHROPIC_API_KEY: str = Field(default="", repr=False)
+    OPENAI_API_KEY: str = Field(default="", repr=False)
+    OPENROUTER_API_KEY: str = Field(default="", repr=False)
+    GEMINI_API_KEY: str = Field(default="", repr=False)
+    GROQ_API_KEY: str = Field(default="", repr=False)
+    TOGETHER_API_KEY: str = Field(default="", repr=False)
+    MISTRAL_API_KEY: str = Field(default="", repr=False)
+    OLLAMA_API_KEY: str = Field(default="", repr=False)
+    VOYAGE_API_KEY: str = Field(default="", repr=False)
+    TAVILY_API_KEY: str = Field(default="", repr=False)
+    BRAVE_API_KEY: str = Field(default="", repr=False)
+    NCBI_API_KEY: str = Field(default="", repr=False)
+    OPENALEX_API_KEY: str = Field(default="", repr=False)
+
+
+class ScopingCfg(BaseModel):
+    # Server chooses the Provider; the UI never handles an API key.
+    allow_live_calls: bool = False
+    model: str | None = None  # defaults to the existing parse_goal model
+    max_calls: int = Field(24, ge=1, le=100)
+    max_turns: int = Field(20, ge=1, le=80)
+    max_tokens: int = Field(60000, ge=1000)
+    budget_usd: float = Field(1.0, gt=0, le=25)
+    max_budget_usd: float = Field(25.0, gt=0, le=25)
+    max_budget_tokens: int = Field(10000000, ge=1000, le=10000000)
+    max_run_seconds: int = Field(7200, ge=1, le=7200)
+    timeout_seconds: float = Field(60, gt=0, le=300)
+    context_chars: int = Field(16000, ge=1000, le=60000)
+    output_tokens: int = Field(2400, ge=256, le=6000)
+
+
+class UploadsCfg(BaseModel):
+    max_file_bytes: int = Field(10 * 1024 * 1024, ge=1024)
+    max_group_bytes: int = Field(30 * 1024 * 1024, ge=1024)
+    max_files: int = Field(8, ge=1, le=30)
+    max_text_chars: int = Field(24000, ge=1000, le=60000)
+    max_image_pixels: int = Field(20000000, ge=1000)
+    # Enable only with a configured API model known to support image input.
+    vision_enabled: bool = False
 
 
 class Config(BaseModel):
@@ -388,9 +436,12 @@ class Config(BaseModel):
     web_search: WebSearchCfg = Field(default_factory=WebSearchCfg)
     web_fetch: WebFetchCfg = Field(default_factory=WebFetchCfg)
     code_exec: CodeExecCfg = Field(default_factory=CodeExecCfg)
+    alpha_protein_novo: AlphaProteinNovoCfg = Field(default_factory=AlphaProteinNovoCfg)
     safety: SafetyCfg = Field(default_factory=SafetyCfg)
     llm: LLMCfg = Field(default_factory=LLMCfg)
     web_ui: WebUICfg = Field(default_factory=WebUICfg)
+    scoping: ScopingCfg = Field(default_factory=ScopingCfg)
+    uploads: UploadsCfg = Field(default_factory=UploadsCfg)
     secrets: Secrets = Field(default_factory=Secrets)
 
     @property

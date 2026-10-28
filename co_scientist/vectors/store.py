@@ -9,8 +9,10 @@ embeddings_meta migration).
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 import os
+from contextlib import contextmanager
 
 import faiss
 import numpy as np
@@ -75,23 +77,50 @@ class FaissStore:
     async def save(self) -> None:
         assert self.index is not None
 
-        # Write to *.tmp then os.replace so a crash mid-write doesn't leave a
-        # corrupted index file behind. Write meta first, then index, then
-        # rename both: if we crash between renames the meta will reflect the
-        # *old* index (which is what load_or_create expects).
-        idx_tmp = self._index_path.with_suffix(self._index_path.suffix + ".tmp")
-        meta_tmp = self._meta_path.with_suffix(self._meta_path.suffix + ".tmp")
+        # File locking protects multiple stores; each leaf is atomically replaced.
 
         def _do() -> None:
-            faiss.write_index(self.index, str(idx_tmp))
-            meta_tmp.write_text(
-                json.dumps({"dim": self.dim, "ordered_ids": self._ordered_ids})
-            )
-            os.replace(idx_tmp, self._index_path)
-            os.replace(meta_tmp, self._meta_path)
+            with self._disk_lock():
+                self._merge_disk()
+                self._save_disk()
 
         async with self._lock:
             await asyncio.to_thread(_do)
+
+    @contextmanager
+    def _disk_lock(self):
+        self._dir.mkdir(parents=True, exist_ok=True)
+        with (self._dir / ".index.lock").open("a") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
+    def _merge_disk(self):
+        if not (self._index_path.exists() and self._meta_path.exists()):
+            return
+        latest = faiss.read_index(str(self._index_path))
+        ids = json.loads(self._meta_path.read_text())["ordered_ids"]
+        if latest.d != self.dim:
+            return
+        if latest.ntotal != len(ids) or len(set(ids)) != len(ids):
+            raise ValueError("FAISS index/metadata inconsistent; rebuild derived index")
+        for index, hid in enumerate(self._ordered_ids):
+            if hid not in ids:
+                latest.add(self.index.reconstruct(index)[None, :])
+                ids.append(hid)
+        self.index = latest
+        self._ordered_ids = ids
+        self._offset_by_id = {hid: i for i, hid in enumerate(ids)}
+
+    def _save_disk(self):
+        idx_tmp = self._index_path.with_suffix(".faiss.tmp")
+        meta_tmp = self._meta_path.with_suffix(".json.tmp")
+        faiss.write_index(self.index, str(idx_tmp))
+        meta_tmp.write_text(json.dumps({"dim": self.dim, "ordered_ids": self._ordered_ids}))
+        os.replace(idx_tmp, self._index_path)
+        os.replace(meta_tmp, self._meta_path)
 
     # ------------------------- ops -------------------------------------- #
 
@@ -106,14 +135,19 @@ class FaissStore:
             vec = vec[None, :]
 
         def _do() -> int:
-            off = self.index.ntotal
-            self.index.add(vec.astype("float32"))
-            return off
+            with self._disk_lock():
+                self._merge_disk()
+                if hypothesis_id in self._offset_by_id:
+                    return self._offset_by_id[hypothesis_id]
+                off = self.index.ntotal
+                self.index.add(vec.astype("float32"))
+                self._ordered_ids.append(hypothesis_id)
+                self._offset_by_id[hypothesis_id] = off
+                self._save_disk()
+                return off
 
         async with self._lock:
             offset = await asyncio.to_thread(_do)
-            self._ordered_ids.append(hypothesis_id)
-            self._offset_by_id[hypothesis_id] = offset
         return offset
 
     async def search(

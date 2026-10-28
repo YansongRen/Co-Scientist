@@ -147,7 +147,7 @@ async def leaderboard(
     async with conn.execute(
         """SELECT id, title, elo, matches_played FROM hypotheses
               WHERE session_id=? AND state IN ('in_tournament','pinned')
-              ORDER BY elo DESC NULLS LAST LIMIT ?""",
+              ORDER BY (elo IS NULL), elo DESC LIMIT ?""",
         (session_id, k),
     ) as cur:
         rows = await cur.fetchall()

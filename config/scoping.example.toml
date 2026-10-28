@@ -1,0 +1,20 @@
+# Optional overlay. Existing LLM/key configuration is reused; put no key here.
+[scoping]
+allow_live_calls = false  # enable manually; UI then uses the configured Provider
+# model = "your-existing-provider-model-id"  # otherwise models.parse_goal
+max_calls = 24
+max_turns = 20
+max_tokens = 60000
+budget_usd = 1.0
+max_budget_usd = 25.0
+max_budget_tokens = 10000000
+max_run_seconds = 7200
+timeout_seconds = 60
+context_chars = 16000
+output_tokens = 2400
+
+[uploads]
+max_file_bytes = 10485760
+max_group_bytes = 31457280
+max_files = 8
+vision_enabled = false  # enable only with an API model supporting image input

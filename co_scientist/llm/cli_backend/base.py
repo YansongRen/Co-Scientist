@@ -34,6 +34,7 @@ from ...config import Config
 from ...ids import transcript_id
 from ...logging import get_logger
 from ...models import Transcript
+from ...obs.activity import observe_llm_call, retry_sleep
 from ...storage.artifacts import write_json
 from ...storage.repos import sessions as sessions_repo
 from ...storage.repos import transcripts as transcripts_repo
@@ -148,6 +149,7 @@ class AgentCliProvider(ABC):
 
     # ----------------------------- main call ----------------------------- #
 
+    @observe_llm_call
     async def call(
         self,
         spec: AgentCallSpec,
@@ -306,7 +308,7 @@ class AgentCliProvider(ABC):
                     backend=self.backend_name, agent=ctx.agent,
                     attempt=attempt, delay_s=round(delay, 1), error=str(e)[:200],
                 )
-                await asyncio.sleep(delay)
+                await retry_sleep(delay, attempt, e, sleep=asyncio.sleep)
             except CliBackendError:
                 raise                      # non-transient: surface immediately
 

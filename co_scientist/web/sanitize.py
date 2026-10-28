@@ -68,11 +68,10 @@ def _safe_href(value: str) -> str | None:
     v = value.strip()
     if not v:
         return None
-    # Relative URLs (no scheme) are fine — they cannot run JS.
-    if "://" not in v and not v.startswith(("mailto:", "javascript:", "data:", "vbscript:", "file:")):
-        return v
+    # urlsplit normalizes case and removes browser-ignored tabs/newlines.
+    # Never classify a URL as relative merely because it lacks ://.
     scheme = urlsplit(v).scheme.lower()
-    if scheme in _SAFE_URL_SCHEMES:
+    if not scheme or scheme in _SAFE_URL_SCHEMES:
         return v
     return None
 

@@ -1,0 +1,60 @@
+# Copy this file to deployment.toml (or mount your own file) before starting.
+# Never put API keys in this file. The application reads them from environment
+# variables such as OPENROUTER_API_KEY or ANTHROPIC_API_KEY.
+
+[storage]
+data_dir = "/data"
+
+[web_ui]
+host = "0.0.0.0"
+port = 8080
+
+[run]
+# Conservative defaults for a shared demo server. Raise only after adding
+# authentication, per-user quotas, and a proper worker/queue deployment.
+research_mode = "lightweight"
+concurrency = 2
+wall_clock_seconds = 1800
+budget_tokens = 100000
+budget_usd = 1.0
+
+[scoping]
+allow_live_calls = false
+max_calls = 12
+max_turns = 12
+max_tokens = 30000
+budget_usd = 0.50
+max_budget_usd = 5.0
+max_budget_tokens = 1000000
+max_run_seconds = 1800
+timeout_seconds = 60
+output_tokens = 1800
+
+[uploads]
+max_file_bytes = 10485760
+max_group_bytes = 31457280
+max_files = 8
+vision_enabled = false
+
+# Select a provider/model appropriate for the server and set its key in the
+# environment. These defaults are examples only; verify model availability.
+[llm]
+provider = "openrouter"
+
+[models]
+parse_goal = "anthropic/claude-sonnet-4-6"
+generation = "anthropic/claude-sonnet-4-6"
+reflection = "anthropic/claude-sonnet-4-6"
+evolution = "anthropic/claude-sonnet-4-6"
+ranking_pairwise = "anthropic/claude-sonnet-4-6"
+ranking_debate = "anthropic/claude-sonnet-4-6"
+ranking_priority = "anthropic/claude-sonnet-4-6"
+metareview_feedback = "anthropic/claude-sonnet-4-6"
+metareview_final = "anthropic/claude-sonnet-4-6"
+classifier = "anthropic/claude-haiku-4.5"
+judge = "anthropic/claude-sonnet-4-6"
+
+[alpha_protein_novo]
+enabled = false
+allow_real_runs = false
+require_real_run_approval = true

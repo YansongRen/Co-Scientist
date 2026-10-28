@@ -33,6 +33,8 @@ from typing import Any
 
 from ..ids import tool_run_id
 from ..logging import get_logger
+from ..obs.activity import emit_activity, safe_text
+from ..safety.evidence import collect_sources
 from ..tools.base import ToolCtx
 from ..tools.registry import ToolRegistry
 from ..tools.urls import extract_urls
@@ -66,6 +68,7 @@ class ToolLoopResult:
     response: LLMResponse                        # final assistant message
     iterations: int
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    source_observations: list[dict[str, Any]] = field(default_factory=list)
     seen_urls: set[str] = field(default_factory=set)
     """Union of URLs that appeared in any tool_result over the loop.
 
@@ -152,6 +155,7 @@ async def _run_driven(
     "looped until exhausted, produced nothing" failure mode where a model
     keeps verifying novelty and never commits.
     """
+    source_observations: list[dict] = []
     seen_urls: set[str] = set()
     tool_calls_log: list[dict[str, Any]] = []
     iterations = 0
@@ -166,8 +170,22 @@ async def _run_driven(
         # the model commits instead of burning its last turn on another search.
         call_spec = current_spec
         if force_terminal_tool and iterations == max_iters:
+            record_tools = [
+                tool for tool in current_spec.tools
+                if tool.get("name") == force_terminal_tool
+            ]
             call_spec = _respec(
-                current_spec, tool_choice={"type": "tool", "name": force_terminal_tool}
+                current_spec,
+                tools=record_tools or current_spec.tools,
+                tool_choice={"type": "tool", "name": force_terminal_tool},
+                extra_messages=[
+                    *current_spec.extra_messages,
+                    {"role": "user", "content": (
+                        "The research phase is over. Do not search or fetch again. "
+                        f"Call {force_terminal_tool} now with your best result "
+                        "based on the evidence already gathered."
+                    )},
+                ],
             )
         resp = await client.call(call_spec, ctx)
         last = resp
@@ -179,6 +197,7 @@ async def _run_driven(
                 iterations=iterations,
                 tool_calls=tool_calls_log,
                 seen_urls=seen_urls,
+                source_observations=source_observations,
             )
 
         # Extract tool_use blocks from the assistant response
@@ -191,6 +210,7 @@ async def _run_driven(
                 iterations=iterations,
                 tool_calls=tool_calls_log,
                 seen_urls=seen_urls,
+                source_observations=source_observations,
             )
 
         # Early termination: if any tool_use is a terminal recording tool,
@@ -199,6 +219,10 @@ async def _run_driven(
         # registry would return "unknown tool" anyway) and we do NOT loop.
         if any(getattr(b, "name", "") in terminal_set for b in tool_uses):
             for b in tool_uses:
+                if getattr(b, "name", "") in terminal_set:
+                    await emit_activity(registry._cfg, ctx, "agent_recorded", {
+                        "tool": b.name, "iteration": iterations,
+                    })
                 tool_calls_log.append({
                     "name": getattr(b, "name", ""),
                     "args": dict(getattr(b, "input", {}) or {}),
@@ -210,6 +234,7 @@ async def _run_driven(
                 iterations=iterations,
                 tool_calls=tool_calls_log,
                 seen_urls=seen_urls,
+                source_observations=source_observations,
             )
 
         tool_uses = tool_uses[:parallel_cap]
@@ -223,12 +248,15 @@ async def _run_driven(
 
         # Update url tracking + log
         for tu, r in zip(tool_uses, results, strict=True):
+            source_observations.extend(collect_sources(r.get("content"), tool=tu.name, failed=r["is_error"]))
+            source_observations = source_observations[-200:]
             tool_calls_log.append(
                 {
                     "name": tu.name,
                     "args": tu.input,
                     "is_error": r["is_error"],
                     "duration_ms": r.get("duration_ms", 0),
+                    "result_count": r.get("result_count"),
                 }
             )
             for u in extract_urls(r.get("content")):
@@ -392,19 +420,47 @@ async def _dispatch(
         run_id=run_id,
     )
     args = dict(tool_use.input) if isinstance(tool_use.input, dict) else {"args": tool_use.input}
+    cfg = registry._cfg
+    from ..config import Config
+
+    detail = next((args[k] for k in ("query", "q", "term", "url") if isinstance(args.get(k), str)), "")
+    payload = {"span_id": run_id, "tool": tool_use.name,
+               "detail": safe_text(cfg, detail) if isinstance(cfg, Config) else ""}
+    await emit_activity(cfg, ctx, "tool_started", payload)
     try:
         result = await asyncio.wait_for(
             registry.call(tool_use.name, args, tctx), timeout=timeout_s
         )
     except TimeoutError:
+        await emit_activity(cfg, ctx, "tool_failed", {
+            **payload, "error_type": "TimeoutError", "error": "工具调用超时",
+            "duration_ms": int((time.monotonic() - t0) * 1000),
+        })
         return {
             "is_error": True,
             "content": {"error": f"tool {tool_use.name!r} timed out"},
             "duration_ms": int((time.monotonic() - t0) * 1000),
         }
+    except BaseException as error:
+        await emit_activity(cfg, ctx, "tool_cancelled" if isinstance(error, asyncio.CancelledError)
+                            else "tool_failed", {
+            **payload, "error_type": type(error).__name__,
+            "duration_ms": int((time.monotonic() - t0) * 1000),
+        })
+        raise
+    content = result.content
+    items = content if isinstance(content, list) else (
+        content.get("results", content.get("papers")) if isinstance(content, dict) else None
+    )
+    await emit_activity(cfg, ctx, "tool_failed" if result.is_error else "tool_completed", {
+        **payload, "duration_ms": int((time.monotonic() - t0) * 1000),
+        "result_count": len(items) if isinstance(items, list) else None,
+        "error": safe_text(cfg, result.error_message) if isinstance(cfg, Config) else "",
+    })
     return {
         "is_error": bool(result.is_error),
         "content": _tool_result_content(result),
+        "result_count": len(items) if isinstance(items, list) else None,
         "duration_ms": result.duration_ms,
     }
 

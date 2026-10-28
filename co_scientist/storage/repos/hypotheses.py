@@ -76,7 +76,7 @@ async def list_for_session(
             rows = await cur.fetchall()
     else:
         async with conn.execute(
-            "SELECT * FROM hypotheses WHERE session_id=? ORDER BY elo DESC NULLS LAST, created_at",
+            "SELECT * FROM hypotheses WHERE session_id=? ORDER BY (elo IS NULL), elo DESC, created_at",
             (session_id,),
         ) as cur:
             rows = await cur.fetchall()

@@ -19,8 +19,10 @@ from ..llm.tool_loop import ToolLoopExhausted, run_tool_loop
 from ..llm.types import AgentCallSpec, CachedBlock, CallContext
 from ..logging import get_logger
 from ..models import CitedPaper, Hypothesis, ResearchPlan, Task, TaskResult
+from ..safety.evidence import NOVELTY_POLICY, annotate_record, audit_summary, infer_molecule
 from ..safety.quoting import quote_untrusted
-from ..storage.artifacts import write_json
+from ..science.alphaprotein_novo import AlphaProteinNovoAdapter
+from ..storage.artifacts import entity_lock, read_json, write_json
 from ..storage.repos import embeddings as emb_repo
 from ..storage.repos import feedback as fb_repo
 from ..storage.repos import hypotheses as hyp_repo
@@ -56,15 +58,7 @@ class GenerationAgent(BaseAgent):
             "abstracts for the most relevant items, then synthesize. After you "
             "have surveyed the literature, call `record_hypothesis` exactly once "
             "with your proposed hypothesis.\n\n"
-            "IMPORTANT — interpreting empty search results: an empty result set "
-            "(no hits) is positive evidence that the literature you searched for "
-            "does not exist. When the goal requires a candidate with NO prior "
-            "published evidence, empty searches CONFIRM novelty — they are a "
-            "reason to PROCEED, not to keep searching. Do not chase confirmation "
-            "you will never get. After at most 2-3 searches that return no "
-            "relevant hits for a candidate, treat its novelty as established and "
-            "call `record_hypothesis`. A recorded hypothesis backed by a few "
-            "empty searches is far better than running out of turns with nothing."
+            + NOVELTY_POLICY
         )
 
         prompt = render(
@@ -74,7 +68,9 @@ class GenerationAgent(BaseAgent):
             articles_with_reasoning=articles_block,
             instructions=(
                 "Propose ONE hypothesis (the strongest you can justify) and "
-                "register it via the record_hypothesis tool. Do not propose more "
+                "register it via the record_hypothesis tool. For each citation, label its "
+                "relation, support_level and study scope; include a verbatim excerpt "
+                "only when it was actually returned by a tool. Do not propose more "
                 "than one — additional hypotheses come from separate Generation calls. "
                 "You MUST end this task by calling record_hypothesis; do not keep "
                 "searching indefinitely. Budget your literature search to a handful "
@@ -134,17 +130,39 @@ class GenerationAgent(BaseAgent):
         # 3. Validate every citation URL is in the union of URLs seen during the loop.
         record["citations"] = _filter_to_seen_urls(record.get("citations", []), loop_result.seen_urls)
 
+        annotate_record(record, loop_result, molecule=plan.target_molecule if plan.target_molecule != "unknown" else infer_molecule(session.research_goal))
+        record["parent_ids"] = []  # Generation has no inherited hypotheses.
+
         # 4. Persist + embed + dedup-check.
         hid, was_new = await self._persist(session.id, record, strategy="literature")
+        exact = hid == ids.hypothesis_id(session.id, "generation/literature", record.get("statement") or record.get("title") or "")
+        if not was_new and exact:
+            existing = await hyp_repo.fetch(self.deps.db, hid)
+            record = (await read_json(self.deps.cfg, existing.artifact_path))["record"]
+        request = _valid_protein_design_request(self.deps, record.get("protein_design_request"))
+        if request is not None and exact:
+            request["hypothesis_id"] = hid
         return TaskResult(
             kind="hypothesis_created",
-            hypothesis_ids=[hid] if was_new else [],
-            extra={"tool_calls": loop_result.tool_calls, "iterations": loop_result.iterations},
+            hypothesis_ids=[hid] if was_new or exact else [],
+            extra={"tool_calls": loop_result.tool_calls, "iterations": loop_result.iterations,
+                   "protein_design_request": request,
+                   "protein_design_requests": [request] if request else []},
         )
 
     # ---------------------------------------------------------------- #
 
     async def _persist(
+        self, session_id: str, record: dict[str, Any], *, strategy: str
+    ) -> tuple[str, bool]:
+        statement = record.get("statement") or record.get("title") or ""
+        hid = ids.hypothesis_id(session_id, f"generation/{strategy}", statement)
+        async with entity_lock(self.deps.cfg, session_id, hid):
+            if await hyp_repo.fetch(self.deps.db, hid):
+                return hid, False
+            return await self._persist_new(session_id, record, strategy=strategy)
+
+    async def _persist_new(
         self, session_id: str, record: dict[str, Any], *, strategy: str
     ) -> tuple[str, bool]:
         statement = record.get("statement") or record.get("title") or ""
@@ -283,8 +301,12 @@ def _render_hypothesis_md(record: dict[str, Any]) -> str:
         parts.append("## Entities\n- " + "\n- ".join(record["entities"]))
     if record.get("anticipated_outcomes"):
         parts.append(f"## Anticipated outcomes\n{record['anticipated_outcomes']}")
+    if record.get("novelty_assessment"):
+        parts.append("**新颖性状态: 尚未核验。** 检索无结果不代表文献不存在。")
     if record.get("novelty_argument"):
         parts.append(f"## Novelty\n{record['novelty_argument']}")
+    if record.get("audit_version"):
+        parts.append(audit_summary(record))
     if record.get("citations"):
         parts.append("## Citations")
         for c in record["citations"]:
@@ -308,6 +330,22 @@ def _build_session_context(goal: str, plan: ResearchPlan, sys_feedback_text: str
         f"- Constraints: {'; '.join(plan.constraints) or '(none)'}\n"
         f"{fb}"
     )
+
+
+def _valid_protein_design_request(deps: AgentDeps, value: Any) -> dict[str, Any] | None:
+    """Accept only an explicit, structurally complete request from the model."""
+    if not isinstance(value, dict):
+        return None
+    manifest, output_dir, mode = value.get("manifest_path"), value.get("output_dir"), value.get("mode")
+    if not all(isinstance(item, str) and item.strip() for item in (manifest, output_dir, mode)):
+        return None
+    if mode not in {"validate", "mock", "real"}:
+        return None
+    try:
+        request = AlphaProteinNovoAdapter(deps.cfg).validate_design_request(value)
+    except (OSError, ValueError, TypeError):
+        return None
+    return request.model_dump(mode="json")
 
 
 async def _latest_system_feedback(deps: AgentDeps, session_id: str) -> str | None:

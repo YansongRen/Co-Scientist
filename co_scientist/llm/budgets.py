@@ -37,6 +37,15 @@ class TokenBudget:
     _global: _Counter = field(default_factory=_Counter)
     _per_agent: dict[str, _Counter] = field(default_factory=dict)
 
+    async def restore_usage(self, conn, session) -> None:
+        """Restore persisted spending on resume; outstanding reservations expire."""
+        async with self._lock:
+            self._global = _Counter(used_tokens=session.budget_used_tokens, used_usd=session.budget_used_usd)
+            async with conn.execute("SELECT agent,SUM(input_tokens) i,SUM(output_tokens) o,SUM(cost_usd) usd FROM transcripts WHERE session_id=? GROUP BY agent", (session.id,)) as cur:
+                for row in await cur.fetchall():
+                    self._per_agent[row["agent"]] = _Counter(used_tokens=row["i"] + row["o"],
+                        used_input_tokens=row["i"], used_output_tokens=row["o"], used_usd=row["usd"])
+
     # ----------------------------- shares ------------------------------- #
 
     def share_tokens(self, agent: str) -> int:

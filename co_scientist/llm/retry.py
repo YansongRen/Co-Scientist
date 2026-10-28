@@ -29,6 +29,8 @@ from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from typing import TypeVar
 
+from ..obs.activity import retry_sleep
+
 try:
     import httpx
     from anthropic import (
@@ -143,7 +145,7 @@ async def with_retry(
                 raise RetryExhausted(e, attempt_total) from e
             ra = _retry_after_seconds(e)
             delay_s = ra if ra is not None else _backoff_ms(policy.base_ms, policy.cap_ms, attempt_429) / 1000
-            await asyncio.sleep(delay_s)
+            await retry_sleep(delay_s, attempt_total, e, sleep=asyncio.sleep)
 
         except APIStatusError as e:
             status = getattr(e, "status_code", None) or getattr(
@@ -158,14 +160,14 @@ async def with_retry(
                 delay_s = (
                     ra if ra is not None else _backoff_ms(policy.base_ms * 2, policy.cap_ms * 2, attempt_529) / 1000
                 )
-                await asyncio.sleep(delay_s)
+                await retry_sleep(delay_s, attempt_total, e, sleep=asyncio.sleep)
             elif status is not None and 500 <= status < 600:
                 attempt_5xx += 1
                 attempt_total += 1
                 if attempt_5xx >= policy.max_attempts_5xx or attempt_total >= policy.max_attempts_total:
                     raise RetryExhausted(e, attempt_total) from e
                 delay_s = _backoff_ms(policy.base_ms // 2 or 250, policy.cap_ms // 2, attempt_5xx) / 1000
-                await asyncio.sleep(delay_s)
+                await retry_sleep(delay_s, attempt_total, e, sleep=asyncio.sleep)
             else:
                 # 4xx other than 429: do not retry
                 raise
@@ -175,18 +177,16 @@ async def with_retry(
             attempt_total += 1
             if attempt_5xx >= policy.max_attempts_5xx or attempt_total >= policy.max_attempts_total:
                 raise RetryExhausted(e, attempt_total) from e
-            await asyncio.sleep(
-                _backoff_ms(policy.base_ms // 2 or 250, policy.cap_ms // 2, attempt_5xx) / 1000
-            )
+            delay_s = _backoff_ms(policy.base_ms // 2 or 250, policy.cap_ms // 2, attempt_5xx) / 1000
+            await retry_sleep(delay_s, attempt_total, e, sleep=asyncio.sleep)
 
         except (APITimeoutError, APIConnectionError, httpx.TimeoutException, httpx.NetworkError) as e:
             attempt_timeout += 1
             attempt_total += 1
             if attempt_timeout >= policy.max_attempts_timeout or attempt_total >= policy.max_attempts_total:
                 raise RetryExhausted(e, attempt_total) from e
-            await asyncio.sleep(
-                _backoff_ms(policy.base_ms, policy.cap_ms // 4, attempt_timeout) / 1000
-            )
+            delay_s = _backoff_ms(policy.base_ms, policy.cap_ms // 4, attempt_timeout) / 1000
+            await retry_sleep(delay_s, attempt_total, e, sleep=asyncio.sleep)
 
 
 # --------------------------------------------------------------------------- #

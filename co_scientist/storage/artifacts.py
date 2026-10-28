@@ -7,8 +7,11 @@ The DB stores the path *relative* to `data_dir` for portability.
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 import re
+import tempfile
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -51,14 +54,53 @@ def _rel(cfg: Config, p: Path) -> str:
 
 def session_root(cfg: Config, session_id: str) -> Path:
     _validate_component(session_id, label="session_id")
-    return cfg.data_dir / "artifacts" / session_id
+    if "/" in session_id:
+        raise ValueError("session_id must be one path component")
+    root = cfg.data_dir / "artifacts" / session_id
+    base = (cfg.data_dir / "artifacts").resolve()
+    expected = base / session_id
+    if root.resolve() != expected:
+        raise ValueError("session root must not redirect through a symlink")
+    return root
+
+
+@asynccontextmanager
+async def entity_lock(cfg: Config, session_id: str, id_: str):
+    """Serialize immutable hypothesis publication across workers/processes."""
+    _validate_component(id_, label="id")
+    if "/" in id_:
+        raise ValueError("entity id must be one component")
+    root = session_root(cfg, session_id) / ".locks"
+    _resolved_under(session_root(cfg, session_id), root)
+    root.mkdir(parents=True, exist_ok=True)
+    with (root / (id_ + ".lock")).open("a") as handle:
+        try:
+            while True:
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    await asyncio.sleep(0.01)
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def _write(p: Path, payload: Any) -> None:
+    _atomic_text(p, json.dumps(payload, indent=2, default=str, ensure_ascii=False))
+
+
+def _atomic_text(p: Path, body: str) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2, default=str, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(p)  # atomic on POSIX
+    with tempfile.NamedTemporaryFile(mode="w", dir=p.parent, prefix=p.name + ".", suffix=".tmp",
+                                     encoding="utf-8", delete=False) as handle:
+        tmp = Path(handle.name)
+        try:
+            handle.write(body)
+            handle.flush()
+            tmp.replace(p)
+        finally:
+            tmp.unlink(missing_ok=True)
 
 
 def _read(p: Path) -> Any:
@@ -69,11 +111,13 @@ async def write_json(cfg: Config, session_id: str, kind: str, id_: str, payload:
     """Persist a JSON artifact; return its relative path."""
     _validate_component(kind, label="kind")
     _validate_component(id_, label="id")
+    if "/" in id_:
+        raise ValueError("artifact id must be one component")
     root = session_root(cfg, session_id)
     p = root / kind / f"{id_}.json"
     # Defence-in-depth: even if the regex misses some pathological case,
     # confirm the final path is inside the session root.
-    _resolved_under(root.parent, p)
+    _resolved_under(root, p)
     await asyncio.to_thread(_write, p, payload)
     return _rel(cfg, p)
 
@@ -87,17 +131,16 @@ async def read_json(cfg: Config, rel_path: str) -> Any:
 async def write_text(cfg: Config, session_id: str, kind: str, id_: str, suffix: str, body: str) -> str:
     _validate_component(kind, label="kind")
     _validate_component(id_, label="id")
+    if "/" in id_:
+        raise ValueError("artifact id must be one component")
     if "/" in suffix or ".." in suffix:
         raise ValueError(f"suffix={suffix!r} is not a valid filename suffix")
     root = session_root(cfg, session_id)
     p = root / kind / f"{id_}{suffix}"
-    _resolved_under(root.parent, p)
+    _resolved_under(root, p)
 
     def _do() -> None:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(p.suffix + ".tmp")
-        tmp.write_text(body, encoding="utf-8")
-        tmp.replace(p)
+        _atomic_text(p, body)
 
     await asyncio.to_thread(_do)
     return _rel(cfg, p)

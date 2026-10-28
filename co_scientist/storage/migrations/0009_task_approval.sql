@@ -1,0 +1,1 @@
+ALTER TABLE tasks ADD COLUMN approval_sha256 TEXT;

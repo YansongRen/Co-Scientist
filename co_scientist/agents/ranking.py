@@ -26,6 +26,7 @@ from ..llm.types import AgentCallSpec, CachedBlock, CallContext
 from ..logging import get_logger
 from ..models import Hypothesis, Task, TaskResult, TournamentMatch
 from ..orchestrator.elo import update_elo
+from ..orchestrator.research_policy import eligible_pairs
 from ..safety.quoting import quote_hypothesis
 from ..storage.repos import (
     hypotheses as hyp_repo,
@@ -33,6 +34,7 @@ from ..storage.repos import (
 from ..storage.repos import (
     reviews as rev_repo,
 )
+from ..storage.repos import scientific_evidence as scientific_evidence_repo
 from ..storage.repos import (
     sessions as sess_repo,
 )
@@ -65,6 +67,9 @@ class RankingAgent(BaseAgent):
         hypothesis_id = task.target_id
         if not hypothesis_id:
             raise ValueError("AddToTournament requires target_id")
+        h = await hyp_repo.fetch(self.deps.db, hypothesis_id)
+        if h is None or h.session_id != task.session_id:
+            raise ValueError("ranking hypothesis/session mismatch")
         changed = await hyp_repo.init_tournament(
             self.deps.db, hypothesis_id,
             initial_elo=float(self.deps.cfg.ranking.elo_initial),
@@ -95,6 +100,8 @@ class RankingAgent(BaseAgent):
         hyp_a, hyp_b, similarity = pair
 
         mode = self._select_mode(hyp_a, hyp_b)
+        await self._activity(task, "开始比较两条假设", mode=mode,
+                             hypothesis_ids=[hyp_a.id, hyp_b.id])
         verdict, rationale, transcript_id = await self._run_debate(
             session, hyp_a, hyp_b, mode=mode
         )
@@ -143,6 +150,8 @@ class RankingAgent(BaseAgent):
             elo_a_before=elo_a_before, elo_b_before=elo_b_before,
             elo_a_after=upd.elo_a_after, elo_b_after=upd.elo_b_after,
         )
+        await self._activity(task, "已完成比较并更新 Elo", winner=verdict,
+                             elo_a=upd.elo_a_after, elo_b=upd.elo_b_after)
         log.info(
             "match_complete",
             mode=mode, hyp_a=hyp_a.id, hyp_b=hyp_b.id, winner=verdict,
@@ -165,6 +174,14 @@ class RankingAgent(BaseAgent):
         *,
         focus_id: str | None,
     ) -> tuple[Hypothesis, Hypothesis, float | None] | None:
+        if self.deps.cfg.run.research_mode == "lightweight":
+            pairs = await eligible_pairs(self.deps.db, session_id, candidates,
+                pair_cap=self.deps.cfg.ranking.lightweight_max_pair_matches,
+                idea_cap=self.deps.cfg.run.max_matches_per_idea)
+            if not pairs:
+                return None
+            a, b = pairs[0]
+            return a, b, None
         # Build the FAISS store once for this pair selection — every prior
         # iteration re-instantiated the embedder, re-read index.faiss + JSON
         # off disk, and reconstructed the entire index just to dot-product two
@@ -308,6 +325,9 @@ class RankingAgent(BaseAgent):
         anchor_is_a = anchor is a
         review_anchor = await self._best_review(anchor.id)
         review_opp = await self._best_review(opponent.id)
+        scientific_evidence = await self._scientific_evidence_context(
+            [anchor.id, opponent.id]
+        )
 
         template = "ranking.debate" if mode == "debate" else "ranking.pairwise"
         prompt_kwargs = {
@@ -320,6 +340,7 @@ class RankingAgent(BaseAgent):
             "hypothesis_2": quote_hypothesis(opponent.full_text, id_=opponent.id),
             "review_1": review_anchor or "(no review)",
             "review_2": review_opp or "(no review)",
+            "scientific_evidence": scientific_evidence,
             "notes": "Be decisive. End your response with the line: better idea: <1 or 2>",
         }
         prompt = render(template, **prompt_kwargs)
@@ -364,12 +385,13 @@ class RankingAgent(BaseAgent):
         return winner, text, resp.transcript_id
 
     async def _best_review(self, hypothesis_id: str) -> str | None:
-        rs = await rev_repo.list_for_hypothesis(self.deps.db, hypothesis_id)
-        if not rs:
-            return None
-        # Prefer 'full' kind if present.
-        rs_sorted = sorted(rs, key=lambda r: (r.kind != "full", -(r.scores.novelty or 0)))
-        return rs_sorted[0].body
+        return await rev_repo.best_for_reasoning(self.deps.cfg, self.deps.db, hypothesis_id)
+
+    async def _scientific_evidence_context(self, hypothesis_ids: list[str]) -> str:
+        """Render only eligible real evidence for formal priority decisions."""
+        return await scientific_evidence_repo.render_for_agents(
+            self.deps.db, hypothesis_ids, include_mock=False, include_invalid=False,
+        )
 
 
 _VERDICT_DIGIT_RE = re.compile(r"^[\W_]*\**\s*([12])\b")

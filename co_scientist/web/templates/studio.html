@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="zh-CN" translate="no">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="Co-Scientist 科研工作区：从问题出发，协作探索、审查与验证研究假设。">
+  <title>Co-Scientist · 研究工作区</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='10' fill='%23202020'/%3E%3Cpath d='M10 10h12v12H10zM6 16h20M16 6v20' stroke='white' fill='none' stroke-width='1.5'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/studio.css">
+  <script>window.STUDIO_DEFAULTS = {{ defaults|tojson }};</script>
+  <script src="/static/inputs.js" defer></script>
+  <script src="/static/scoping.js" defer></script>
+  <script src="/static/studio.js" defer></script>
+</head>
+<body>
+  <svg class="sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="6.8"/><path d="m16 16 4.5 4.5"/></symbol>
+    <symbol id="i-panel" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M12 19V5m-6 6 6-6 6 6"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></symbol>
+    <symbol id="i-flask" viewBox="0 0 24 24"><path d="M9 3h6m-5 0v6L4.5 18a2 2 0 0 0 1.7 3h11.6a2 2 0 0 0 1.7-3L14 9V3M7 14h10"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M13 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10Zm0 0v7h7M8 14h8m-8 3h5"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6" rx="1.5"/><rect x="14" y="4" width="6" height="6" rx="1.5"/><rect x="4" y="14" width="6" height="6" rx="1.5"/><rect x="14" y="14" width="6" height="6" rx="1.5"/></symbol>
+    <symbol id="i-activity" viewBox="0 0 24 24"><path d="M3 12h4l3-7 4 14 3-7h4"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M15 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h3"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="m9 15 6-6m-6 1-2 2a4 4 0 0 0 5 6l3-3m0-1 2-2a4 4 0 0 0-5-6l-3 3"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3" fill="currentColor" stroke="none"/><circle cx="15" cy="17" r="3" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="i-spark" viewBox="0 0 24 24"><path d="m12 3 2.8 6.2L21 12l-6.2 2.8L12 21l-2.8-6.2L3 12l6.2-2.8Z"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v9H3Z"/></symbol>
+    <symbol id="i-book" viewBox="0 0 24 24"><path d="M12 6C9 4 6 4 3 5v14c3-1 6-1 9 1 3-2 6-2 9-1V5c-3-1-6-1-9 1Zm0 0v14"/></symbol>
+  </defs></svg>
+
+  <aside class="sidebar" id="sidebar">
+    <div class="brand-row"><a class="brand" href="/" aria-label="Co-Scientist 首页"><span class="brand-mark"><i></i><i></i><i></i><i></i></span><strong>Co-Scientist</strong></a><button class="icon-button sidebar-toggle" aria-label="收起侧栏" data-action="sidebar"><svg><use href="#i-panel"/></svg></button></div>
+    <button class="new-research" data-action="new"><svg><use href="#i-plus"/></svg><span>新建研究</span><kbd>⌘ N</kbd></button>
+    <button class="nav-item" data-action="search"><svg><use href="#i-search"/></svg><span>搜索研究</span><kbd>⌘ K</kbd></button>
+    <div class="sidebar-divider"></div>
+    <div class="section-label">工作空间</div>
+    <button class="nav-item current" data-action="workspace"><svg><use href="#i-folder"/></svg><span>我的研究</span><span class="nav-count" id="session-count">0</span></button>
+    <button class="nav-item" data-action="library"><svg><use href="#i-book"/></svg><span>文献资料</span></button>
+    <div class="history-heading"><span>研究记录</span><button class="icon-button small" aria-label="新建研究" data-action="new"><svg><use href="#i-plus"/></svg></button></div>
+    <div class="session-list" id="session-list"><div class="sidebar-loading">正在读取研究记录…</div></div>
+    <div class="sidebar-bottom"><button class="profile" data-action="settings"><span class="avatar">S</span><span><strong>我的科研空间</strong></span><svg><use href="#i-settings"/></svg></button></div>
+  </aside>
+
+  <main class="workspace">
+    <header class="topbar"><div class="breadcrumbs"><button class="icon-button" data-action="sidebar" aria-label="切换侧栏"><svg><use href="#i-panel"/></svg></button><span>我的研究</span><span class="slash">/</span><strong id="breadcrumb-title">新建研究</strong></div><div class="topbar-actions"><span class="local-status"><span class="connection-dot"></span> 本地已连接</span><button class="icon-button" data-action="inspector" aria-label="切换研究概览"><svg><use href="#i-panel"/></svg></button></div></header>
+    <div class="work-layout">
+      <section class="main-column">
+        {% if defaults.preview_only %}<div class="scope-preview-banner" role="status">离线预览</div>{% endif %}
+        <div class="view-tabs" id="view-tabs"><div role="tablist" aria-label="研究视图"><button role="tab" aria-selected="true" data-view="research">研究</button><button role="tab" aria-selected="false" data-view="agents">Agent 动态</button><button role="tab" aria-selected="false" data-view="hypotheses">假设 <span id="hyp-count">0</span></button><button role="tab" aria-selected="false" data-view="evidence">证据核查</button><button role="tab" aria-selected="false" data-view="activity">运行记录</button></div><span class="session-state" id="session-state">准备就绪</span></div>
+        <div class="conversation-scroll" id="conversation-scroll"><div class="conversation" id="conversation"><div class="initial-loading"><span class="loading-line"></span></div></div></div>
+        <div class="composer-area"><div class="composer" id="composer"><div id="direct-attachments"></div><input type="file" id="direct-files" hidden multiple accept=".pdf,.docx,.txt,.md,.csv,.json,.png,.jpg,.jpeg,.webp"><textarea id="question" rows="2" aria-label="科研问题" placeholder="输入研究问题…"></textarea><div class="composer-bottom"><div class="composer-options"><button class="icon-button" aria-label="上传附件" data-action="attach"><svg><use href="#i-plus"/></svg></button><button class="scope-text-button" data-action="parameters">参数</button><span class="model-label"><svg><use href="#i-spark"/></svg> <span id="model-label">{{ defaults.model }}</span></span></div><button class="send-button" id="send" aria-label="开始一项新研究" disabled><svg><use href="#i-arrow"/></svg></button></div></div></div>
+      </section>
+      <aside class="inspector" id="inspector"><div class="inspector-title">研究概览<button class="icon-button small" data-action="inspector" aria-label="关闭研究概览"><svg><use href="#i-x"/></svg></button></div><div id="inspector-content"></div></aside>
+    </div>
+  </main>
+
+  <dialog id="detail-dialog" class="detail-dialog"><div class="dialog-top"><span id="detail-eyebrow">研究详情</span><button class="icon-button" data-action="close-detail" aria-label="关闭"><svg><use href="#i-x"/></svg></button></div><div id="detail-content" class="dialog-content"></div></dialog>
+  <dialog id="launch-dialog" class="launch-dialog"><div class="dialog-top"><span>创建研究</span><button class="icon-button" data-action="close-launch" aria-label="关闭"><svg><use href="#i-x"/></svg></button></div><div class="launch-content"><div class="launch-question" id="launch-question"></div><form id="launch-form"><div class="form-grid"><label>研究模式<select name="research_mode" id="research-mode"><option value="lightweight">轻量研究 · 推荐</option><option value="standard">标准研究</option></select></label><label>研究对象<select name="target_molecule"><option value="unspecified">自动识别 / 不限定</option><option value="DNA">DNA</option><option value="RNA">RNA</option></select></label></div><label>预算上限 <span>USD</span><input name="budget_usd" type="number" min="0.001" max="25" step="0.001" value="1" required></label><label>Token 上限<input name="budget_tokens" type="number" min="1000" max="10000000" step="1" required></label><div class="form-grid"><label>初始假设<input name="n_initial" type="number" min="2" max="6" value="2" required></label><label>运行时限 <span>秒</span><input name="wall_clock_seconds" type="number" min="60" max="7200" value="600" required></label></div><button type="submit" class="primary-button" id="launch-submit">开始研究 <svg><use href="#i-arrow"/></svg></button><p class="form-error" id="launch-error" role="alert"></p></form></div></dialog>
+  <dialog id="search-dialog" class="search-dialog"><div class="search-field"><svg><use href="#i-search"/></svg><input id="search-input" type="search" aria-label="搜索研究记录" placeholder="搜索研究问题…"><kbd>ESC</kbd></div><div id="search-results"></div></dialog>
+  <div class="toast" id="toast" role="status"></div>
+</body>
+</html>

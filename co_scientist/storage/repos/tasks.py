@@ -1,10 +1,12 @@
 """Durable task queue repository.
 
-Uses SQLite RETURNING (3.35+) for atomic claim. Lease TTL is set by the caller.
+Uses an immediate transaction for atomic claim, including system SQLite 3.26.
+Lease TTL is set by the caller.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from datetime import UTC, datetime
@@ -46,9 +48,12 @@ async def enqueue(conn: aiosqlite.Connection, task: Task) -> bool:
         )
         await conn.commit()
         return True
-    except aiosqlite.IntegrityError:
-        # idempotency_key UNIQUE collision; already enqueued.
-        return False
+    except aiosqlite.IntegrityError as exc:
+        # Do not hide FK/data-integrity errors as a successful deduplication.
+        if "UNIQUE constraint failed: tasks." in str(exc):
+            await conn.commit()
+            return False
+        raise
 
 
 async def claim_one(
@@ -57,19 +62,34 @@ async def claim_one(
     """Atomically claim the highest-priority pending task for a session."""
     expires_at = _epoch_ms() + lease_seconds * 1000
     started_at = _now()
-    async with conn.execute(
-        """UPDATE tasks
-              SET status='leased', lease_owner=?, lease_expires_at=?, started_at=?
-            WHERE id = (
-                SELECT id FROM tasks
-                 WHERE session_id=? AND status='pending'
-                 ORDER BY priority ASC, created_at ASC
-                 LIMIT 1)
-        RETURNING *""",
-        (worker_id, expires_at, started_at, session_id),
-    ) as cur:
-        row = await cur.fetchone()
-    await conn.commit()
+    # BEGIN IMMEDIATE serializes selection and mutation across worker connections.
+    # Do not use RETURNING: Alibaba Cloud Linux 3 ships SQLite 3.26.
+    await conn.execute("BEGIN IMMEDIATE")
+    try:
+        async with conn.execute(
+            """SELECT q.id FROM tasks q
+                 WHERE q.session_id=? AND q.status='pending'
+                   AND (q.action NOT IN ('RunTournamentBatch','EvolveTopHypotheses','UpdateProximityGraph')
+                        OR NOT EXISTS (SELECT 1 FROM tasks active WHERE active.session_id=q.session_id
+                            AND active.action=q.action AND active.status IN ('leased','in_progress')))
+                 ORDER BY q.priority ASC, q.created_at ASC
+                 LIMIT 1""",
+            (session_id,),
+        ) as cur:
+            candidate = await cur.fetchone()
+        row = None
+        if candidate is not None:
+            await conn.execute(
+                """UPDATE tasks SET status='leased', lease_owner=?, lease_expires_at=?, started_at=?
+                   WHERE id=? AND status='pending'""",
+                (worker_id, expires_at, started_at, candidate["id"]),
+            )
+            async with conn.execute("SELECT * FROM tasks WHERE id=?", (candidate["id"],)) as cur:
+                row = await cur.fetchone()
+        await conn.commit()
+    except BaseException:
+        await conn.rollback()
+        raise
     return _row_to_task(row) if row else None
 
 
@@ -84,7 +104,8 @@ async def heartbeat(conn: aiosqlite.Connection, task_id: str, lease_seconds: int
 
 async def mark_in_progress(conn: aiosqlite.Connection, task_id: str) -> None:
     await conn.execute(
-        "UPDATE tasks SET status='in_progress' WHERE id=?", (task_id,)
+        "UPDATE tasks SET status='in_progress',started_at=COALESCE(started_at,?) WHERE id=?",
+        (_now(), task_id),
     )
     await conn.commit()
 
@@ -95,6 +116,31 @@ async def complete(conn: aiosqlite.Connection, task_id: str) -> None:
         (_now(), task_id),
     )
     await conn.commit()
+
+
+async def approve(conn: aiosqlite.Connection, task_id: str) -> bool:
+    """Release a human-reviewed scientific task into the normal queue."""
+    async with conn.execute("SELECT payload FROM tasks WHERE id=? AND action='RunProteinDesign' AND status='awaiting_approval'", (task_id,)) as cur:
+        row = await cur.fetchone()
+    if row is None:
+        return False
+    payload = json.loads(row["payload"])
+    from ...science.alphaprotein_novo import input_fingerprint
+    digest = input_fingerprint(payload["manifest_path"])
+    if payload.get("input_sha256") != digest:
+        raise ValueError("scientific inputs changed; submit a new request for review")
+    approval = approval_digest(payload, digest)
+    cur = await conn.execute(
+        "UPDATE tasks SET status='pending',approval_sha256=? WHERE id=? AND status='awaiting_approval' AND payload=?",
+        (approval, task_id, row["payload"]),
+    )
+    changed = cur.rowcount > 0
+    await conn.commit()
+    return changed
+
+
+def approval_digest(payload: dict, input_sha256: str) -> str:
+    return hashlib.sha256((json.dumps(payload, sort_keys=True) + input_sha256).encode()).hexdigest()
 
 
 async def fail(

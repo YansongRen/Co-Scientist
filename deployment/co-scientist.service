@@ -1,0 +1,32 @@
+[Unit]
+Description=Co-Scientist research workspace
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=coscientist
+Group=coscientist
+WorkingDirectory=/opt/co-scientist
+EnvironmentFile=/opt/co-scientist/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONPATH=/opt/co-scientist
+Environment=OMP_NUM_THREADS=1
+Environment=OPENBLAS_NUM_THREADS=1
+ExecStartPre=/opt/co-scientist/.venv/bin/co-scientist --config /opt/co-scientist/config/deployment.toml init
+ExecStart=/opt/co-scientist/.venv/bin/co-scientist --config /opt/co-scientist/config/deployment.toml serve --host 127.0.0.1 --port 8080
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=45
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/data
+
+[Install]
+WantedBy=multi-user.target

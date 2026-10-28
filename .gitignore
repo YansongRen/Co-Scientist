@@ -42,3 +42,14 @@ docs/REIMPL_VS_PAPER.md
 .ruff_cache/
 htmlcov/
 .coverage
+
+# Private deployments and local validation artifacts
+.env.*
+!.env.example
+config/deployment.toml
+config/deployment.toml.*
+*.pem
+*.key
+docs/validation/
+docs/deployment-preview-verification.md
+._*

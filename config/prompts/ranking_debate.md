@@ -21,6 +21,9 @@ Initial review of hypothesis 1:
 Initial review of hypothesis 2:
 {{ review_2 }}
 
+Persisted computational evidence (traceable data, not experimental activity):
+{{ scientific_evidence | default('No AlphaProtein Novo evidence is attached to either hypothesis.') }}
+
 Debate procedure:
 The discussion will unfold in a series of turns, typically ranging from 3 to 5, with a maximum of 10.
 

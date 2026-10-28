@@ -1,0 +1,17 @@
+services:
+  co-scientist:
+    build: .
+    ports:
+      - "127.0.0.1:8080:8080"
+    env_file:
+      - .env
+    environment:
+      CO_SCIENTIST_CONFIG: /app/config/deployment.toml
+      PORT: 8080
+    volumes:
+      - co_scientist_data:/data
+      - ./config/deployment.toml:/app/config/deployment.toml:ro
+    restart: unless-stopped
+
+volumes:
+  co_scientist_data:

@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..config import Config
+from .alphaprotein_novo import AlphaProteinNovoTool
 from .base import Tool, ToolCtx, ToolResult, to_anthropic_tool
 from .builtins.arxiv import ArxivSearchTool
 from .builtins.europe_pmc import EuropePMCSearchTool
@@ -29,6 +30,7 @@ AGENT_TOOLS: dict[str, set[str]] = {
         "web_search", "web_fetch",
         "pubmed_search", "arxiv_search", "europe_pmc_search",
         "literature_*",
+        "alphaprotein_novo",
         # code_exec wired in M2
     },
     "ranking": set(),                # no tools mid-debate
@@ -36,6 +38,7 @@ AGENT_TOOLS: dict[str, set[str]] = {
         "web_search", "web_fetch",
         "pubmed_search", "arxiv_search", "europe_pmc_search",
         "literature_*",
+        "alphaprotein_novo",
     },
     "proximity": set(),
     "metareview": set(),
@@ -54,6 +57,7 @@ class ToolRegistry:
             PubmedSearchTool(self._cfg),
             ArxivSearchTool(),
             EuropePMCSearchTool(),
+            AlphaProteinNovoTool(self._cfg),
         ):
             self._register(t)
         # web_search only registers if a backing search API key is set.

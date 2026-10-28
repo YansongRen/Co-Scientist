@@ -6,6 +6,9 @@ anyway). We use aiosqlite for the async API and set PRAGMAs on each connect.
 
 from __future__ import annotations
 
+import asyncio
+import sqlite3
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -18,7 +21,16 @@ MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
 
 async def _apply_pragmas(conn: aiosqlite.Connection) -> None:
-    await conn.execute("PRAGMA journal_mode=WAL;")
+    await conn.execute("PRAGMA busy_timeout=5000;")
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            await conn.execute("PRAGMA journal_mode=WAL;")
+            break
+        except aiosqlite.OperationalError as exc:
+            if "locked" not in str(exc).lower() or time.monotonic() >= deadline:
+                raise
+            await asyncio.sleep(0.02)
     await conn.execute("PRAGMA synchronous=NORMAL;")
     await conn.execute("PRAGMA foreign_keys=ON;")
     await conn.execute("PRAGMA busy_timeout=5000;")
@@ -29,7 +41,11 @@ async def connect(cfg: Config) -> aiosqlite.Connection:
     cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = await aiosqlite.connect(cfg.db_path)
     conn.row_factory = aiosqlite.Row
-    await _apply_pragmas(conn)
+    try:
+        await _apply_pragmas(conn)
+    except BaseException:
+        await conn.close()
+        raise
     return conn
 
 
@@ -37,9 +53,12 @@ async def init_db(cfg: Config) -> None:
     """Create the DB if missing and apply pending migrations."""
     conn = await connect(cfg)
     try:
-        await _ensure_migrations_table(conn)
+        await conn.execute("BEGIN IMMEDIATE")
+        await conn.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL, name TEXT NOT NULL)")
         await _apply_pending(conn)
+        await conn.commit()
     finally:
+        await conn.rollback()
         await conn.close()
 
 
@@ -64,6 +83,9 @@ def _discover_migrations() -> list[tuple[int, str, Path]]:
     """Return [(version, name, path)] sorted by version."""
     out: list[tuple[int, str, Path]] = []
     for p in sorted(MIGRATIONS_DIR.glob("*.sql")):
+        # macOS archives may include ._*.sql AppleDouble sidecars.
+        if p.name.startswith("."):
+            continue
         stem = p.stem  # e.g. 0001_initial
         version_str, _, name = stem.partition("_")
         out.append((int(version_str), name or "unnamed", p))
@@ -77,25 +99,23 @@ async def _apply_pending(conn: aiosqlite.Connection) -> None:
             continue
         # v1 special-case: load the canonical schema.sql to avoid duplication.
         sql = SCHEMA_PATH.read_text() if version == 1 else path.read_text()
-        try:
-            await conn.executescript(sql)
-        except aiosqlite.OperationalError as e:
-            # When the canonical schema.sql is already ahead of an early
-            # migration (e.g. fresh init creates v1 with `feasibility`, then
-            # v2 tries to ALTER TABLE … ADD COLUMN feasibility), the ALTER
-            # becomes a no-op. Mark it applied and move on.
-            msg = str(e).lower()
-            if "duplicate column name" in msg or (
-                "already exists" in msg and "create" not in sql.lower()
-            ):
-                pass
-            else:
-                raise
+        statement = ""
+        for line in sql.splitlines(keepends=True):
+            statement += line
+            if not sqlite3.complete_statement(statement):
+                continue
+            try:
+                await conn.execute(statement)
+            except aiosqlite.OperationalError as e:
+                # The canonical fresh schema may already include an ALTER's column.
+                msg = str(e).lower()
+                if "duplicate column name" not in msg:
+                    raise
+            statement = ""
         await conn.execute(
             "INSERT INTO schema_migrations(version, applied_at, name) VALUES (?, ?, ?)",
             (version, datetime.now(UTC).isoformat(), name),
         )
-        await conn.commit()
 
 
 async def table_names(conn: aiosqlite.Connection) -> list[str]:

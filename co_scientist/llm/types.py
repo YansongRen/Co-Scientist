@@ -56,6 +56,13 @@ class CachedBlock:
 
 
 @dataclass
+class InputImage:
+    media_type: str
+    data_base64: str = field(repr=False)
+    attachment_id: str = ""
+
+
+@dataclass
 class AgentCallSpec:
     """Inputs to one LLM call, before a backend serializes them."""
 
@@ -72,6 +79,7 @@ class AgentCallSpec:
     max_output_tokens: int = 4096
     stop_sequences: list[str] | None = None
     extra_messages: list[dict[str, Any]] = field(default_factory=list)
+    input_images: list[InputImage] = field(default_factory=list)
     """Appended *after* the user_blocks message — tool_use/tool_result threads."""
 
 
@@ -193,4 +201,5 @@ def rough_token_count(spec: AgentCallSpec) -> int:
     # under-reserves the budget.
     if spec.tools:
         n += len(json.dumps(spec.tools)) // 4
+    n += len(spec.input_images) * 8192
     return max(n, 32)

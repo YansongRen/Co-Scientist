@@ -207,8 +207,11 @@ async def test_force_terminal_tool_on_final_iteration() -> None:
         is_error=False, content={"n": 0, "results": []}, duration_ms=1,
     ))
 
+    spec = _spec()
+    record_tool = {"name": "record_hypothesis", "input_schema": {"type": "object"}}
+    spec.tools.append(record_tool)
     result = await run_tool_loop(
-        client, spec=_spec(), ctx=_ctx(), registry=registry,
+        client, spec=spec, ctx=_ctx(), registry=registry,
         max_iters=3, parallel_cap=4, tool_timeout_s=1.0,
         force_terminal_tool="record_hypothesis",
     )
@@ -218,6 +221,8 @@ async def test_force_terminal_tool_on_final_iteration() -> None:
     # The final (3rd) call forced tool_choice to record_hypothesis.
     final_spec = client.call.await_args_list[-1].args[0]
     assert final_spec.tool_choice == {"type": "tool", "name": "record_hypothesis"}
+    assert final_spec.tools == [record_tool]
+    assert "research phase is over" in final_spec.extra_messages[-1]["content"]
     # Earlier calls used the original auto tool_choice (no forcing).
     first_spec = client.call.await_args_list[0].args[0]
     assert first_spec.tool_choice != {"type": "tool", "name": "record_hypothesis"}

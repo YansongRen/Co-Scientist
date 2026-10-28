@@ -9,7 +9,9 @@ import aiosqlite
 
 from ..config import Config
 from ..llm.provider import LLMProvider
+from ..llm.types import CallContext
 from ..models import Task, TaskResult
+from ..obs.activity import emit_activity
 from ..safety.quoting import SAFETY_PREAMBLE
 from ..tools.registry import ToolRegistry
 
@@ -33,6 +35,11 @@ class BaseAgent:
     # Subclasses override
     async def execute(self, task: Task) -> TaskResult:  # pragma: no cover
         raise NotImplementedError
+
+    async def _activity(self, task: Task, label: str, **detail) -> None:
+        await emit_activity(self.deps.cfg,
+            CallContext(task.session_id, task.id, self.name, task.action),
+            "agent_step", {"label": label, **detail}, db=self.deps.db)
 
     # ----------------------------- helpers ----------------------------- #
 

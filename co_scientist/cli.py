@@ -375,6 +375,74 @@ def run(
     console.print(f"View report:  co-scientist report {session_id}")
 
 
+@app.command(name="protein-design")
+def protein_design(
+    ctx: typer.Context,
+    session_id: str = typer.Argument(..., help="Existing Co-Scientist session."),
+    hypothesis_id: str = typer.Option("", "--hypothesis", help="Hypothesis receiving the evidence."),
+    manifest: Path = typer.Option(..., "--manifest", help="Official AlphaProtein Novo JSON manifest."),
+    output_dir: Path = typer.Option(..., "--output-dir", help="Campaign output directory."),
+    mode: str = typer.Option("validate", "--mode", help="validate | mock | real"),
+) -> None:
+    """Queue an explicit AlphaProtein Novo validation or campaign for a session.
+
+    The command only queues work.  A real campaign additionally requires both
+    `alpha_protein_novo.enabled=true` and `allow_real_runs=true` in config.
+    """
+    if mode not in {"validate", "mock", "real"}:
+        raise typer.BadParameter("mode must be validate, mock, or real")
+    cfg, _ = ctx.obj
+
+    async def _do() -> bool:
+        conn = await db_mod.connect(cfg)
+        try:
+            from .science.alphaprotein_novo import AlphaProteinNovoAdapter
+            from .science.design_queue import enqueue_design
+            from .storage.repos import sessions as sess_repo
+
+            session = await sess_repo.fetch(conn, session_id)
+            if session is None:
+                raise ValueError(f"no such session: {session_id}")
+            if not hypothesis_id:
+                raise ValueError("--hypothesis is required for a tracked scientific task")
+            request = AlphaProteinNovoAdapter(cfg).validate_design_request({
+                "manifest_path": str(manifest.resolve()),
+                "output_dir": str(output_dir.resolve()),
+                "mode": mode,
+                "design_iteration": 1,
+            })
+            return await enqueue_design(cfg, session_id, hypothesis_id, request.model_dump(mode="json"))
+        finally:
+            await conn.close()
+
+    inserted = asyncio.run(_do())
+    console.print(f"[green]Queued[/green] AlphaProtein Novo {mode} task for session={session_id} (new={inserted})")
+    console.print("Resume the session to execute the task; real mode remains config-gated.")
+    console.print("Campaign output is allocated under the session/task artifact directory to preserve history.")
+
+
+@app.command(name="approve-protein-design")
+def approve_protein_design(
+    ctx: typer.Context,
+    task_id: str = typer.Argument(..., help="Task waiting for human approval."),
+) -> None:
+    """Release a real AlphaProtein Novo task after human review."""
+    cfg, _ = ctx.obj
+
+    async def _do() -> bool:
+        conn = await db_mod.connect(cfg)
+        try:
+            from .storage.repos import tasks as task_repo
+            return await task_repo.approve(conn, task_id)
+        finally:
+            await conn.close()
+
+    approved = asyncio.run(_do())
+    if not approved:
+        raise typer.BadParameter(f"task {task_id!r} is not awaiting approval")
+    console.print(f"[green]Approved[/green] scientific task={task_id}; resume the session to execute it.")
+
+
 @app.command()
 def resume(
     ctx: typer.Context,
@@ -542,6 +610,19 @@ def eval_cmd(
         result = asyncio.run(run_agent(cfg, agent, offline=offline))
     else:
         result = asyncio.run(run_all(cfg, offline=offline))
+    console.print_json(data=result)
+
+
+@app.command("scientific-evidence-eval")
+def scientific_evidence_eval(
+    ctx: typer.Context,
+    input_path: Path = typer.Argument(..., help="JSON recording with baseline/evidence agent outputs."),
+    output_path: Path | None = typer.Option(None, "--output", help="Optional JSON result path."),
+) -> None:
+    """Compare recorded A/B reasoning runs without making any model calls."""
+    from .evals.scientific_evidence_ab import compare_file
+
+    result = compare_file(str(input_path), str(output_path) if output_path else None)
     console.print_json(data=result)
 
 

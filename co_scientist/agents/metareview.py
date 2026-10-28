@@ -23,6 +23,7 @@ from ..logging import get_logger
 from ..models import SystemFeedback, Task, TaskResult
 from ..models.hypothesis import CitedPaper
 from ..models.review import Evidence
+from ..safety.evidence import NOVELTY_POLICY, audit_summary
 from ..storage.artifacts import write_json, write_text
 from ..storage.repos import feedback as fb_repo
 from ..storage.repos import hypotheses as hyp_repo
@@ -53,6 +54,7 @@ class MetaReviewAgent(BaseAgent):
             raise RuntimeError(f"session {task.session_id} missing")
 
         reviews = await rev_repo.list_for_session(self.deps.db, session.id)
+        reviews = await rev_repo.reasoning_reviews(self.deps.cfg, self.deps.db, reviews)
         if not reviews:
             return TaskResult(kind="noop", extra={"reason": "no reviews yet"})
 
@@ -75,7 +77,7 @@ class MetaReviewAgent(BaseAgent):
         spec = AgentCallSpec(
             route=r,
             system_blocks=[
-                CachedBlock(self._system_prompt_header(), cache=True),
+                CachedBlock(self._system_prompt_header() + "\n" + NOVELTY_POLICY + "\nUse evidence audit metadata to preserve scope limitations. A quote match does not confirm claim support.", cache=True),
                 CachedBlock(
                     f"# Research goal\n{session.research_goal}\n\n"
                     f"# Preferences\n{'; '.join(session.research_plan.preferences)}",
@@ -218,14 +220,14 @@ class MetaReviewAgent(BaseAgent):
         if not seen:
             return ""
 
-        lines: list[str] = []
+        lines: list[str] = ["Source provenance: URLs appeared in tools; textual and scientific support require separate verification."]
         for i, (url, meta) in enumerate(list(seen.items())[:limit], start=1):
             refs = ", ".join(dict.fromkeys(meta["refs"]))[:120]
             line = f"- [S{i}] {meta['title'][:200]}\n  {url}"
             if meta["excerpt"]:
                 line += f'\n  > "{meta["excerpt"][:300]}"'
             if refs:
-                line += f"\n  (supports: {refs})"
+                line += f"\n  (cited by hypotheses: {refs}; relation not independently verified)"
             lines.append(line)
         if len(seen) > limit:
             lines.append(f"- …and {len(seen) - limit} more sources not shown.")
@@ -249,13 +251,20 @@ class MetaReviewAgent(BaseAgent):
         # hypothesis_id. Beats N+1 list_for_hypothesis() calls for top-K.
         reviews_by_hyp: dict[str, list] = {}
         for rv in await rev_repo.list_for_session(self.deps.db, session.id):
+            if not await rev_repo.reasoning_reviews(self.deps.cfg, self.deps.db, [rv]):
+                continue
             reviews_by_hyp.setdefault(rv.hypothesis_id, []).append(rv)
 
         # Build the top-hypotheses block: summary + best review + winning rationale
         chunks: list[str] = []
         for h in top:
+            h_audit = audit_summary(await self._read_record(h.artifact_path))
             review_lines: list[str] = []
             for r in reviews_by_hyp.get(h.id, []):
+                review_record = await self._read_record(r.artifact_path)
+                review_lines.append(audit_summary(review_record))
+                if review_record.get("notes"):
+                    review_lines.append("Review limitations: " + str(review_record["notes"])[:1200])
                 review_lines.append(
                     f"  - {r.kind}: verdict={r.verdict or '?'} "
                     f"(n={r.scores.novelty}, c={r.scores.correctness}, t={r.scores.testability})"
@@ -264,7 +273,7 @@ class MetaReviewAgent(BaseAgent):
             chunks.append(
                 f"### `{h.id}` (Elo {elo_s}, strategy `{h.strategy}`)\n"
                 f"**Title.** {h.title}\n\n"
-                f"{h.summary}\n\n"
+                f"{h.summary}\n\n{h_audit}\n\n"
                 f"**Reviews:**\n" + ("\n".join(review_lines) or "  (none)")
             )
         top_block = "\n\n---\n\n".join(chunks)
@@ -287,7 +296,7 @@ class MetaReviewAgent(BaseAgent):
         spec = AgentCallSpec(
             route=r,
             system_blocks=[
-                CachedBlock(self._system_prompt_header(), cache=True),
+                CachedBlock(self._system_prompt_header() + "\n" + NOVELTY_POLICY + "\nUse evidence audit metadata to preserve scope limitations. A quote match does not confirm claim support.", cache=True),
                 CachedBlock(
                     f"# Research goal\n{session.research_goal}\n\n"
                     f"# Preferences\n{'; '.join(session.research_plan.preferences)}",

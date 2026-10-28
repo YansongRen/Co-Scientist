@@ -24,16 +24,19 @@ from ..llm.tool_loop import ToolLoopExhausted, run_tool_loop
 from ..llm.types import AgentCallSpec, CachedBlock, CallContext
 from ..logging import get_logger
 from ..models import CitedPaper, Hypothesis, Task, TaskResult
+from ..safety.evidence import NOVELTY_POLICY, annotate_record, audit_summary, infer_molecule
 from ..safety.quoting import quote_hypothesis
-from ..storage.artifacts import write_json
+from ..science.alphaprotein_novo import AlphaProteinNovoAdapter
+from ..storage.artifacts import entity_lock, read_json, write_json
 from ..storage.repos import embeddings as emb_repo
 from ..storage.repos import feedback as fb_repo
 from ..storage.repos import hypotheses as hyp_repo
 from ..storage.repos import reviews as rev_repo
+from ..storage.repos import scientific_evidence as scientific_evidence_repo
 from ..storage.repos import sessions as sess_repo
 from ..vectors.embedder import make_embedder
 from ..vectors.store import FaissStore
-from .base import BaseAgent
+from .base import AgentDeps, BaseAgent
 from .schemas import RECORD_HYPOTHESIS_TOOL
 
 log = get_logger("evolution")
@@ -59,37 +62,51 @@ class EvolutionAgent(BaseAgent):
             return TaskResult(kind="noop", extra={"reason": "need at least 2 top hypotheses"})
 
         new_ids: list[str] = []
+        design_requests: list[dict[str, Any]] = []
         for strat in strategies:
+            if self.deps.cfg.run.research_mode == "lightweight":
+                current = await hyp_repo.list_for_session(self.deps.db, session.id)
+                if len(current) >= self.deps.cfg.run.max_ideas:
+                    break
+            await self._activity(task, "正在根据反馈演化假设", strategy=strat,
+                                 hypothesis_ids=[h.id for h in top])
             try:
-                hid = await self._evolve_one(session, top, strategy=strat)
+                hid, request = await self._evolve_one(session, top, strategy=strat)
             except Exception as e:
                 log.warning("evolution_strategy_failed", strategy=strat, err=str(e))
                 continue
             if hid:
                 new_ids.append(hid)
+                if request is not None:
+                    design_requests.append(request)
 
         return TaskResult(
             kind="hypothesis_created",
             hypothesis_ids=new_ids,
-            extra={"strategies_used": strategies},
+            extra={
+                "strategies_used": strategies,
+                "protein_design_requests": design_requests,
+                # Keep the singular key for older Supervisor integrations.
+                "protein_design_request": design_requests[0] if len(design_requests) == 1 else None,
+            },
         )
 
     # ----------------------------- one strategy ----------------------------- #
 
     async def _evolve_one(
         self, session, top: list[Hypothesis], *, strategy: EvoStrategy
-    ) -> str | None:
+    ) -> tuple[str | None, dict[str, Any] | None]:
         if strategy == "combine":
             return await self._combine(session, top)
         if strategy == "out_of_box":
             return await self._out_of_box(session, top)
         return await self._unary(session, top, strategy=strategy)
 
-    async def _combine(self, session, top: list[Hypothesis]) -> str | None:
+    async def _combine(self, session, top: list[Hypothesis]) -> tuple[str | None, dict[str, Any] | None]:
         # Pick the most idea-distant pair within the top set.
         pair = await self._most_distant_pair(session.id, top)
         if pair is None:
-            return None
+            return None, None
         a, b = pair
         review_a = await self._best_review(a.id)
         review_b = await self._best_review(b.id)
@@ -106,7 +123,7 @@ class EvolutionAgent(BaseAgent):
             mode_for_route="combine", parent_ids=[a.id, b.id],
         )
 
-    async def _out_of_box(self, session, top: list[Hypothesis]) -> str | None:
+    async def _out_of_box(self, session, top: list[Hypothesis]) -> tuple[str | None, dict[str, Any] | None]:
         inspirations = top[:5]
         prompt = render(
             "evolution.out_of_box",
@@ -125,7 +142,7 @@ class EvolutionAgent(BaseAgent):
 
     async def _unary(
         self, session, top: list[Hypothesis], *, strategy: EvoStrategy
-    ) -> str | None:
+    ) -> tuple[str | None, dict[str, Any] | None]:
         h = top[0]
         review = await self._best_review(h.id)
         template = f"evolution.{strategy}"
@@ -152,9 +169,9 @@ class EvolutionAgent(BaseAgent):
         strategy: EvoStrategy,
         mode_for_route: str,
         parent_ids: list[str],
-    ) -> str | None:
+    ) -> tuple[str | None, dict[str, Any] | None]:
         sys_blocks = [
-            CachedBlock(self._system_prompt_header(), cache=True),
+            CachedBlock(self._system_prompt_header() + "\n" + NOVELTY_POLICY, cache=True),
             CachedBlock(
                 _build_session_context(session.research_goal, session.research_plan,
                                        await self._latest_feedback(session.id)),
@@ -162,6 +179,9 @@ class EvolutionAgent(BaseAgent):
             ),
         ]
         user_blocks = [CachedBlock(prompt, cache=False)]
+        evidence_context = await self._scientific_evidence_context(parent_ids)
+        if evidence_context:
+            user_blocks.append(CachedBlock(evidence_context, cache=False))
 
         r = route(self.deps.cfg, "evolution", mode_for_route)
         tools = [*self.deps.tools.anthropic_tools_for("evolution"), RECORD_HYPOTHESIS_TOOL]
@@ -188,25 +208,49 @@ class EvolutionAgent(BaseAgent):
             )
         except ToolLoopExhausted as e:
             log.warning("evolution_tool_loop_exhausted", err=str(e))
-            return None
+            return None, None
 
         record = self._final_tool_use(result.response, "record_hypothesis")
         if record is None:
             log.warning("evolution_no_record")
-            return None
+            return None, None
 
         # Citation URL filter (same as Generation).
         record["citations"] = [
             c for c in record.get("citations", [])
             if isinstance(c, dict) and c.get("url") in result.seen_urls
         ]
+        annotate_record(record, result, molecule=session.research_plan.target_molecule if session.research_plan.target_molecule != "unknown" else infer_molecule(session.research_goal))
         record["strategy"] = strategy
         record["parent_ids"] = parent_ids
 
+        design_request = _valid_protein_design_request(
+            self.deps, record.get("protein_design_request"), parent_ids=parent_ids
+        )
+        if design_request is not None:
+            record["protein_design_request"] = design_request
+
         hid, was_new = await self._persist(session.id, record, strategy=strategy)
-        return hid if was_new else None
+        exact = hid == ids.hypothesis_id(session.id, f"evolution/{strategy}", record.get("statement") or record.get("title") or "")
+        if not was_new and exact:
+            existing = await hyp_repo.fetch(self.deps.db, hid)
+            stored = (await read_json(self.deps.cfg, existing.artifact_path))["record"]
+            design_request = _valid_protein_design_request(self.deps, stored.get("protein_design_request"), parent_ids=existing.parent_ids)
+        if design_request is not None and exact:
+            design_request["hypothesis_id"] = hid
+        return (hid if was_new or exact else None), (design_request if was_new or exact else None)
 
     async def _persist(
+        self, session_id: str, record: dict[str, Any], *, strategy: str
+    ) -> tuple[str, bool]:
+        statement = record.get("statement") or record.get("title") or ""
+        hid = ids.hypothesis_id(session_id, f"evolution/{strategy}", statement)
+        async with entity_lock(self.deps.cfg, session_id, hid):
+            if await hyp_repo.fetch(self.deps.db, hid):
+                return hid, False
+            return await self._persist_new(session_id, record, strategy=strategy)
+
+    async def _persist_new(
         self, session_id: str, record: dict[str, Any], *, strategy: str
     ) -> tuple[str, bool]:
         statement = record.get("statement") or record.get("title") or ""
@@ -333,15 +377,36 @@ class EvolutionAgent(BaseAgent):
         return best or (top[0], top[1])
 
     async def _best_review(self, hypothesis_id: str) -> str | None:
-        rs = await rev_repo.list_for_hypothesis(self.deps.db, hypothesis_id)
-        if not rs:
-            return None
-        rs_sorted = sorted(rs, key=lambda r: (r.kind != "full", -(r.scores.novelty or 0)))
-        return rs_sorted[0].body
+        return await rev_repo.best_for_reasoning(self.deps.cfg, self.deps.db, hypothesis_id)
 
     async def _latest_feedback(self, session_id: str) -> str | None:
         fb = await fb_repo.latest_system_feedback(self.deps.db, session_id)
         return fb.text if fb is not None else None
+
+    async def _scientific_evidence_context(self, hypothesis_ids: list[str]) -> str:
+        return await scientific_evidence_repo.render_for_agents(
+            self.deps.db, hypothesis_ids, include_mock=False, include_invalid=False,
+        )
+
+
+# ----------------------------- request validation ----------------------------- #
+
+
+def _valid_protein_design_request(
+    deps: AgentDeps, value: Any, *, parent_ids: list[str]
+) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        request = AlphaProteinNovoAdapter(deps.cfg).validate_design_request(
+            value, parent_hypothesis_id=parent_ids[0] if parent_ids else None
+        )
+    except (OSError, TypeError, ValueError):
+        # A model cannot turn an invalid or fabricated path into a task.
+        return None
+    request.config_version = "alphaprotein_novo-v1"
+    request.requires_approval = request.mode == "real" and deps.cfg.alpha_protein_novo.require_real_run_approval
+    return request.model_dump(mode="json")
 
 
 # ----------------------------- formatting helpers ----------------------------- #
@@ -358,8 +423,12 @@ def _render_hypothesis_md(record: dict[str, Any]) -> str:
         parts.append("## Entities\n- " + "\n- ".join(record["entities"]))
     if record.get("anticipated_outcomes"):
         parts.append(f"## Anticipated outcomes\n{record['anticipated_outcomes']}")
+    if record.get("novelty_assessment"):
+        parts.append("**新颖性尚未核验。** 检索无结果不代表文献不存在。")
     if record.get("novelty_argument"):
         parts.append(f"## Novelty\n{record['novelty_argument']}")
+    if record.get("audit_version"):
+        parts.append(audit_summary(record))
     if record.get("citations"):
         parts.append("## Citations")
         for c in record["citations"]:

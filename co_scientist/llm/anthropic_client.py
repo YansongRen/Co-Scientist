@@ -27,9 +27,9 @@ from anthropic import AsyncAnthropic
 from ..config import Config
 from ..ids import transcript_id
 from ..models import Transcript
+from ..obs.activity import observe_llm_call
 from ..storage.artifacts import write_json
-from ..storage.repos import sessions as sessions_repo
-from ..storage.repos import transcripts as transcripts_repo
+from .accounting import persist_call
 from .budgets import TokenBudget
 from .retry import RetryPolicy, with_retry
 from .routing import estimate_cost_usd
@@ -79,6 +79,7 @@ class AnthropicClient:
 
     # ----------------------------- main call ----------------------------- #
 
+    @observe_llm_call
     async def call(
         self,
         spec: AgentCallSpec,
@@ -90,6 +91,9 @@ class AnthropicClient:
         # Build payload
         system = _build_blocks(spec.system_blocks) or None
         first_user = _build_blocks(spec.user_blocks)
+        for image in spec.input_images:
+            first_user.extend([{"type": "text", "text": f"Attachment {image.attachment_id}"},
+                {"type": "image", "source": {"type": "base64", "media_type": image.media_type, "data": image.data_base64}}])
         messages: list[dict[str, Any]] = []
         if first_user:
             messages.append({"role": "user", "content": first_user})
@@ -204,8 +208,7 @@ class AnthropicClient:
             finished_at=finished,
             artifact_path=artifact_path,
         )
-        await transcripts_repo.insert(self._db, t)
-        await sessions_repo.add_usage(self._db, ctx.session_id, in_tok + out_tok, cost_usd)
+        await persist_call(self._db, t)
 
         return AnthropicResponse(
             raw=resp,

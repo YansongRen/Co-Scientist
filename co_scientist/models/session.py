@@ -11,6 +11,7 @@ SessionStatus = Literal["running", "paused", "done", "failed", "aborted"]
 
 
 class ResearchPlan(BaseModel):
+    target_molecule: str = "unknown"
     """The Supervisor's parsed view of the scientist's goal.
 
     Filled by a one-shot Claude call at session start (`parse_goal`).

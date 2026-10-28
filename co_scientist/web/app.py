@@ -17,15 +17,16 @@ import logging as stdlib_logging
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import BackgroundTasks, FastAPI, Form, HTTPException, Request
+from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sse_starlette.sse import EventSourceResponse
 
 from .. import ids
+from .. import inputs as user_inputs
 from ..config import Config, load_config
 from ..logging import get_logger
 from ..models import SystemFeedback
@@ -37,7 +38,11 @@ from ..storage.repos import hypotheses as hyp_repo
 from ..storage.repos import reviews as rev_repo
 from ..storage.repos import sessions as sess_repo
 from ..storage.repos import transcripts as tx_repo
+from .inputs import InputBodyLimit, create_inputs_router
+from .research_start import LaunchOptions, prepare_research, schedule_research
 from .sanitize import render_markdown
+from .scoping import create_scoping_router
+from .studio import create_studio_router
 
 log = get_logger("web")
 HERE = Path(__file__).parent
@@ -49,13 +54,17 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     app = FastAPI(title="AI Co-Scientist")
     app.state.cfg = cfg
     app.state.background_runs: dict[str, asyncio.Task] = {}
+    app.add_middleware(InputBodyLimit, max_bytes=cfg.uploads.max_group_bytes + 1024 * 1024)
 
     # Static
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
+    app.include_router(create_studio_router(cfg))
+    app.include_router(create_scoping_router(cfg))
+    app.include_router(create_inputs_router(cfg))
 
     # ----------------------------- pages ----------------------------- #
 
-    @app.get("/", response_class=HTMLResponse)
+    @app.get("/classic", response_class=HTMLResponse)
     async def index(request: Request) -> HTMLResponse:
         rows = await _list_sessions(cfg)
         return TEMPLATES.TemplateResponse(
@@ -71,35 +80,37 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     @app.post("/sessions/new")
     async def create_session(
         request: Request,
-        background_tasks: BackgroundTasks,
         goal: str = Form(...),
         preferences: str = Form(""),
-        budget_usd: float = Form(cfg.run.budget_usd),
-        n_initial: int = Form(3),
-        wall_clock_seconds: int = Form(cfg.run.wall_clock_seconds),
-    ) -> RedirectResponse:
-        from ..agents.supervisor import Supervisor
-
-        # Hand the Supervisor a fresh Config copy so per-session knobs don't leak.
-        sup_cfg = cfg.model_copy(deep=True)
-        sup_cfg.run.budget_usd = budget_usd
-        sup_cfg.run.wall_clock_seconds = wall_clock_seconds
-        sup = Supervisor(sup_cfg)
-
-        async def _run() -> None:
-            try:
-                await sup.run_session(
-                    goal=goal, preferences_text=preferences or None,
-                    n_initial=n_initial, wall_clock_seconds=wall_clock_seconds,
-                )
-            except Exception:
-                log.exception("background_run_failed")
-
-        task = asyncio.create_task(_run())
-        # No durable session id at this point — give the run a chance to insert
-        # the row, then redirect to /. The user can find it in the listing.
-        _ = task
-        return RedirectResponse(url="/", status_code=303)
+        budget_usd: float = Form(cfg.run.budget_usd, gt=0, le=25),
+        budget_tokens: int | None = Form(None, ge=1000, le=10000000),
+        upload_group_id: str = Form(""),
+        n_initial: int = Form(2, ge=1, le=20),
+        wall_clock_seconds: int = Form(cfg.run.wall_clock_seconds, ge=60, le=7200),
+        research_mode: Literal["standard", "lightweight"] = Form("lightweight"),
+        target_molecule: Literal["unspecified", "DNA", "RNA"] = Form("unspecified"),
+    ):
+        if not goal.strip() or len(goal) > 20000 or len(preferences) > 30000:
+            raise HTTPException(422, "请输入有效的研究目标 (最多20000字)")
+        try:
+            options = LaunchOptions(budget_usd=budget_usd, budget_tokens=budget_tokens, upload_group_id=upload_group_id or None, n_initial=n_initial,
+                wall_clock_seconds=wall_clock_seconds, research_mode=research_mode, target_molecule=target_molecule)
+        except ValueError:
+            raise HTTPException(422, "研究参数无效, 轻量研究需要2至6条初始假设") from None
+        conn = await db_mod.connect(cfg)
+        try:
+            await conn.execute("BEGIN IMMEDIATE")
+            session = await prepare_research(conn, cfg, options, goal=goal.strip(), preferences=preferences)
+            await conn.commit()
+        except user_inputs.InputError as exc:
+            raise HTTPException(exc.status, str(exc)) from None
+        finally:
+            await conn.rollback()
+            await conn.close()
+        schedule_research(app, cfg, options, session)
+        if "application/json" in request.headers.get("accept", ""):
+            return JSONResponse({"session_id": session.id}, status_code=201)
+        return RedirectResponse(url=f"/#session/{session.id}", status_code=303)
 
     @app.get("/sessions/{session_id}", response_class=HTMLResponse)
     async def session_detail(request: Request, session_id: str) -> HTMLResponse:
@@ -130,7 +141,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         try:
             h = await hyp_repo.fetch(conn, hid)
             session = await sess_repo.fetch(conn, session_id)
-            if h is None or session is None:
+            if h is None or session is None or h.session_id != session_id:
                 raise HTTPException(status_code=404, detail="not found")
             reviews = await rev_repo.list_for_hypothesis(conn, hid)
             return TEMPLATES.TemplateResponse(

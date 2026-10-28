@@ -105,7 +105,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     lease_expires_at    INTEGER,
     attempts            INTEGER NOT NULL DEFAULT 0,
     last_error          TEXT,
-    idempotency_key     TEXT UNIQUE
+    idempotency_key     TEXT UNIQUE,
+    approval_sha256     TEXT,
+    result_json         TEXT
 );
 CREATE INDEX IF NOT EXISTS tasks_queue ON tasks(session_id, status, priority, created_at);
 
@@ -183,7 +185,99 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS events_sess ON events(session_id, ts DESC);
 CREATE INDEX IF NOT EXISTS events_type ON events(event, ts DESC);
 
+-- Scientific Evidence Layer. Values remain linked to original tool artifacts.
+CREATE TABLE IF NOT EXISTS scientific_evidence (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    hypothesis_id TEXT REFERENCES hypotheses(id) ON DELETE SET NULL,
+    design_id TEXT,
+    design_iteration INTEGER,
+    kind TEXT NOT NULL,
+    status TEXT NOT NULL,
+    metric_name TEXT NOT NULL,
+    metric_value TEXT,
+    unit TEXT,
+    uncertainty TEXT,
+    model_version TEXT,
+    config_sha256 TEXT,
+    source_path TEXT NOT NULL,
+    artifact_path TEXT NOT NULL,
+    source_role TEXT NOT NULL,
+    evaluation_condition TEXT,
+    notes TEXT,
+    parent_ids TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS evidence_hyp ON scientific_evidence(hypothesis_id, created_at);
+CREATE INDEX IF NOT EXISTS evidence_task ON scientific_evidence(task_id, created_at);
+
 -- Schema version tracking (linear migrations)
+-- Pre-research drafts are independent of formal scientific Sessions.
+CREATE TABLE IF NOT EXISTS scoping_drafts (
+    id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 0,
+    messages_json TEXT NOT NULL DEFAULT '[]',
+    brief_json TEXT,
+    use_live INTEGER NOT NULL DEFAULT 0,
+    linked_session_id TEXT UNIQUE REFERENCES sessions(id),
+    busy_call_id TEXT,
+    busy_until REAL,
+    limits_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE TABLE IF NOT EXISTS scoping_calls (
+    id TEXT PRIMARY KEY,
+    draft_id TEXT NOT NULL REFERENCES scoping_drafts(id),
+    request_id TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    status TEXT NOT NULL,
+    model TEXT NOT NULL,
+    prompt_json TEXT NOT NULL,
+    prompt_sha256 TEXT NOT NULL,
+    result_json TEXT,
+    error TEXT,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL NOT NULL DEFAULT 0,
+    reserved_tokens INTEGER NOT NULL DEFAULT 0,
+    reserved_usd REAL NOT NULL DEFAULT 0,
+    usage_known INTEGER NOT NULL DEFAULT 0,
+    transcript_json TEXT,
+    created_at TEXT NOT NULL,
+    finished_at TEXT,
+    elapsed_seconds REAL NOT NULL DEFAULT 0,
+    UNIQUE(draft_id, request_id)
+);
+CREATE INDEX IF NOT EXISTS scoping_calls_draft ON scoping_calls(draft_id, created_at);
+
+CREATE TABLE IF NOT EXISTS input_groups (
+    id TEXT PRIMARY KEY,
+    draft_id TEXT UNIQUE REFERENCES scoping_drafts(id),
+    session_id TEXT UNIQUE REFERENCES sessions(id),
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS input_files (
+    id TEXT PRIMARY KEY,
+    group_id TEXT NOT NULL REFERENCES input_groups(id),
+    name TEXT NOT NULL,
+    media_type TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    path TEXT NOT NULL,
+    text_content TEXT NOT NULL DEFAULT '',
+    extraction_truncated INTEGER NOT NULL DEFAULT 0,
+    parse_status TEXT NOT NULL,
+    parse_error TEXT,
+    width INTEGER,
+    height INTEGER,
+    created_at TEXT NOT NULL,
+    removed_at TEXT,
+    UNIQUE(group_id,sha256)
+);
+CREATE INDEX IF NOT EXISTS input_files_group ON input_files(group_id,created_at);
+
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version     INTEGER PRIMARY KEY,
     applied_at  TEXT NOT NULL,

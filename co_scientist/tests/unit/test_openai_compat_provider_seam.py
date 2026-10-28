@@ -146,6 +146,22 @@ async def test_plain_openai_stays_strict(tmp_cfg, conn):
     cfg.secrets.OPENAI_API_KEY = "sk-fake"
     sent = await _capture(cfg, conn, "openai", _continuation_spec("gpt-5"))
     assert set(sent["messages"][-2]["tool_calls"][0]) == {"id", "type", "function"}
+    assert "extra_body" not in sent
+
+
+@pytest.mark.asyncio
+async def test_compatible_provider_forwards_configured_body_extensions(tmp_cfg, conn):
+    cfg = tmp_cfg
+    cfg.secrets.OPENAI_API_KEY = "fake"
+    cfg.llm.openai.base_url = "https://api.deepseek.com"
+    cfg.llm.openai.extra_body = {"thinking": {"type": "disabled"}}
+    spec = _continuation_spec("deepseek-flash")
+    spec.tool_choice = {"type": "tool", "name": "record_hypothesis"}
+    sent = await _capture(cfg, conn, "openai_compatible", spec)
+    assert sent["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert sent["tool_choice"] == {
+        "type": "function", "function": {"name": "record_hypothesis"},
+    }
 
 
 @pytest.mark.asyncio

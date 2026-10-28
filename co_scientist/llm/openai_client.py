@@ -41,9 +41,9 @@ import aiosqlite
 from ..config import Config
 from ..ids import transcript_id
 from ..models import Transcript
+from ..obs.activity import observe_llm_call
 from ..storage.artifacts import write_json
-from ..storage.repos import sessions as sessions_repo
-from ..storage.repos import transcripts as transcripts_repo
+from .accounting import persist_call
 from .anthropic_client import (
     AgentCallSpec,
     AnthropicResponse,
@@ -211,6 +211,7 @@ class OpenAIClient:
 
     # ----------------------------- main call ----------------------------- #
 
+    @observe_llm_call
     async def call(
         self,
         spec: AgentCallSpec,
@@ -230,6 +231,10 @@ class OpenAIClient:
                 self._provider_name, _NO_TOOL_CALL_REPLAY_FIELDS
             ),
         )
+        # Provider extensions, e.g. DeepSeek's explicit non-thinking mode
+        # required for forced function calls, are opt-in configuration.
+        if self._cfg.llm.openai.extra_body:
+            request["extra_body"] = self._cfg.llm.openai.extra_body
 
         # Estimate + admit (same accounting as AnthropicClient).
         est_in = est_input_tokens or _rough_token_count(spec)
@@ -305,8 +310,7 @@ class OpenAIClient:
             finished_at=finished,
             artifact_path=artifact_path,
         )
-        await transcripts_repo.insert(self._db, t)
-        await sessions_repo.add_usage(self._db, ctx.session_id, in_tok + out_tok, cost_usd)
+        await persist_call(self._db, t)
 
         return AnthropicResponse(
             raw=message,
@@ -340,7 +344,13 @@ def _build_openai_request(
 
     # First user turn from user_blocks.
     user_text = "\n\n".join(b.text for b in spec.user_blocks if b.text).strip()
-    if user_text:
+    if spec.input_images:
+        content = [{"type": "text", "text": user_text or "User attachments"}]
+        for image in spec.input_images:
+            content.extend([{"type": "text", "text": f"Attachment {image.attachment_id}"},
+                {"type": "image_url", "image_url": {"url": f"data:{image.media_type};base64,{image.data_base64}"}}])
+        messages.append({"role": "user", "content": content})
+    elif user_text:
         messages.append({"role": "user", "content": user_text})
 
     # extra_messages comes from the tool loop in Anthropic shape; translate.

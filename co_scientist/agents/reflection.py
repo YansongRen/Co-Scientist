@@ -15,10 +15,12 @@ from ..llm.routing import route
 from ..llm.tool_loop import ToolLoopExhausted, run_tool_loop
 from ..llm.types import AgentCallSpec, CachedBlock, CallContext
 from ..models import Review, ReviewScores, Task, TaskResult
+from ..safety.evidence import annotate_record, audit_summary, infer_molecule
 from ..safety.quoting import quote_hypothesis
 from ..storage.artifacts import write_json
 from ..storage.repos import hypotheses as hyp_repo
 from ..storage.repos import reviews as rev_repo
+from ..storage.repos import scientific_evidence as scientific_evidence_repo
 from ..storage.repos import sessions as sess_repo
 from .base import BaseAgent
 from .schemas import RECORD_REVIEW_TOOL
@@ -39,9 +41,26 @@ class ReflectionAgent(BaseAgent):
         h = await hyp_repo.fetch(self.deps.db, hypothesis_id)
         if h is None:
             raise RuntimeError(f"hypothesis {hypothesis_id} missing")
+        if h.session_id != task.session_id:
+            raise ValueError("reflection hypothesis/session mismatch")
+
+        # One immutable review per scientific run; retries reuse it.
+        scientific_task_id = task.payload.get("scientific_task_id")
+        review_id = ids.review_id(h.id, "full", iteration=scientific_task_id or 0)
+        previous = await rev_repo.fetch(self.deps.db, review_id)
+        if previous is not None:
+            return TaskResult(kind="review_completed", hypothesis_ids=[h.id], review_ids=[review_id],
+                              extra={"verdict": previous.verdict})
 
         if kind != "full":
             raise NotImplementedError(f"reflection kind {kind!r} lands in a later milestone")
+
+        scientific_evidence = await scientific_evidence_repo.list_for_hypothesis(
+            self.deps.db, h.id
+        )
+        evidence_block = await scientific_evidence_repo.render_for_agents(
+            self.deps.db, [h.id], include_mock=True, include_invalid=True,
+        )
 
         prompt = render(
             "reflection.full",
@@ -52,8 +71,12 @@ class ReflectionAgent(BaseAgent):
             articles_block=(
                 "Use the available search tools (web_search, pubmed_search, "
                 "arxiv_search, europe_pmc_search, web_fetch) to gather supporting "
-                "and contradicting evidence. Cite URLs that you actually fetched."
+                "and contradicting evidence. Cite URLs that you actually fetched. "
+                "For every evidence item, label relation, support_level and source scope. "
+                "Distinguish DNA from RNA and label cross-scope extrapolations as uncertain. "
+                "Do not equate a matching quotation with support for the hypothesis."
             ),
+            scientific_evidence=evidence_block,
         )
 
         sys_blocks = [
@@ -106,7 +129,14 @@ class ReflectionAgent(BaseAgent):
             if isinstance(e, dict) and e.get("url") in seen
         ]
 
-        review_id = ids.review_id(h.id, "full", iteration=0)
+        annotate_record(record, loop_result, review=True, molecule=session.research_plan.target_molecule if session.research_plan.target_molecule != "unknown" else infer_molecule(session.research_goal))
+        if scientific_evidence:
+            record["scientific_evidence_ids"] = [row.id for row in scientific_evidence]
+            record["scientific_evidence_status"] = sorted({row.status for row in scientific_evidence})
+
+        # Validate model numbers before publishing any artifact.
+        scores = ReviewScores(**{key: record.get(key) for key in
+                                 ("novelty", "correctness", "testability", "feasibility")})
         artifact_path = await write_json(
             self.deps.cfg, session.id, "reviews", review_id,
             {"hypothesis_id": h.id, "record": record},
@@ -119,12 +149,7 @@ class ReflectionAgent(BaseAgent):
             created_at=datetime.now(UTC),
             kind="full",
             verdict=record.get("verdict"),       # type: ignore[arg-type]
-            scores=ReviewScores(
-                novelty=record.get("novelty"),
-                correctness=record.get("correctness"),
-                testability=record.get("testability"),
-                feasibility=record.get("feasibility"),
-            ),
+            scores=scores,
             body=body_md,
             artifact_path=artifact_path,
         )
@@ -145,6 +170,8 @@ class ReflectionAgent(BaseAgent):
 
 def _render_review_md(record: dict[str, Any]) -> str:
     parts: list[str] = ["# Review"]
+    if record.get("evidence_audit"):
+        parts.append("**证据核查说明: ** 引文匹配仅核对工具返回内容; 是否支持论断及跨研究对象外推仍需人工核验。")
     if record.get("verdict"):
         parts.append(f"**Verdict.** {record['verdict']}")
     scores = []
@@ -153,6 +180,8 @@ def _render_review_md(record: dict[str, Any]) -> str:
             scores.append(f"{s} {record[s]:.2f}")
     if scores:
         parts.append("**Scores.** " + " · ".join(scores))
+    if record.get("audit_version"):
+        parts.append(audit_summary(record))
     if record.get("assumptions"):
         parts.append("## Assumptions")
         for a in record["assumptions"]:
@@ -167,3 +196,19 @@ def _render_review_md(record: dict[str, Any]) -> str:
     if record.get("notes"):
         parts.append(f"## Notes\n{record['notes']}")
     return "\n\n".join(parts)
+
+
+def _scientific_evidence_block(rows) -> str:
+    if not rows:
+        return "No AlphaProtein Novo evidence is attached to this review."
+    lines = [
+        "The following values are deterministic outputs parsed from persisted AlphaProtein Novo artifacts.",
+        "Use the numbers exactly as shown; interpret them as computational evidence only. Do not infer experimental catalytic activity.",
+    ]
+    for row in rows:
+        lines.append(
+            f"- evidence_id={row.id}; design={row.design_id or '?'}; "
+            f"kind={row.kind}; status={row.status}; metric={row.metric_name}; "
+            f"value={row.metric_value!r}; source={row.source_path}; artifact={row.artifact_path}"
+        )
+    return "\n".join(lines)
