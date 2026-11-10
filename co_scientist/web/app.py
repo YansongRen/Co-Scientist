@@ -85,6 +85,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         budget_usd: float = Form(cfg.run.budget_usd, gt=0, le=25),
         budget_tokens: int | None = Form(None, ge=1000, le=10000000),
         upload_group_id: str = Form(""),
+        concurrency: int = Form(1, ge=1, le=4),
         n_initial: int = Form(2, ge=1, le=20),
         wall_clock_seconds: int = Form(cfg.run.wall_clock_seconds, ge=60, le=7200),
         research_mode: Literal["standard", "lightweight"] = Form("lightweight"),
@@ -93,7 +94,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         if not goal.strip() or len(goal) > 20000 or len(preferences) > 30000:
             raise HTTPException(422, "请输入有效的研究目标 (最多20000字)")
         try:
-            options = LaunchOptions(budget_usd=budget_usd, budget_tokens=budget_tokens, upload_group_id=upload_group_id or None, n_initial=n_initial,
+            options = LaunchOptions(concurrency=concurrency, budget_usd=budget_usd, budget_tokens=budget_tokens, upload_group_id=upload_group_id or None, n_initial=n_initial,
                 wall_clock_seconds=wall_clock_seconds, research_mode=research_mode, target_molecule=target_molecule)
         except ValueError:
             raise HTTPException(422, "研究参数无效, 轻量研究需要2至6条初始假设") from None

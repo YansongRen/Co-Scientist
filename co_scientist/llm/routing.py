@@ -210,6 +210,8 @@ def route(cfg: Config, agent: str, mode: str | None = None, *, degraded: bool = 
     model = {
         ("generation", "literature"):  m.generation,
         ("generation", "debate"):      m.generation,
+        ("generation", "assumption"):  m.generation,
+        ("generation", "feedback_driven"): m.generation,
         ("reflection", "full"):        m.reflection,
         ("reflection", "verification"):m.reflection,
         ("reflection", "observation"): m.reflection,

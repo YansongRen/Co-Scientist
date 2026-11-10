@@ -202,6 +202,7 @@ def make_embedder(cfg: Config) -> Embedder:
         _warn_once("openai_key_missing_using_hash_fallback")
         return HashEmbedder(cfg)
     if provider == "hash":
+        _warn_once("hash_embedding_lexical_only_degraded_mode")
         return HashEmbedder(cfg)
     raise ValueError(f"unknown embeddings provider: {provider}")
 

@@ -61,11 +61,26 @@ class EmbeddingsCfg(BaseModel):
     dim: int = 1024
 
 
+class GenerationCfg(BaseModel):
+    # Repeated entries give deterministic integer weights, in configured order.
+    strategies: list[Literal["literature", "debate", "assumption", "feedback_driven"]] = Field(
+        default_factory=lambda: ["literature", "debate", "assumption", "feedback_driven"], min_length=1, max_length=32)
+    context_chars: int = Field(6000, ge=500, le=20000)
+    context_hypotheses: int = Field(16, ge=1, le=50)
+    feedback_chars: int = Field(4000, ge=500, le=10000)
+    idle_enabled: bool = True
+    idle_batch_size: int = Field(1, ge=1, le=8)
+    max_idle_rounds: int = Field(2, ge=0, le=20)
+
+
 class VectorsCfg(BaseModel):
     backend: str = "faiss"
-    dedup_cosine_threshold: float = 0.92
-    cluster_threshold: float = 0.15
-    full_recluster_every_matches: int = 20
+    dedup_cosine_threshold: float = Field(0.92, ge=0, le=2, allow_inf_nan=False)
+    cluster_threshold: float = Field(0.15, ge=0, le=2)  # cosine DISTANCE
+    mark_duplicates: bool = True  # block near-duplicate publication; never delete rows
+    proximity_refresh_interval: int = Field(3, ge=1)  # new pool-size buckets
+    embedding_timeout_seconds: float = Field(30, gt=0, le=300)
+    full_recluster_every_matches: int = Field(20, ge=1)
 
 
 class RankingCfg(BaseModel):
@@ -95,12 +110,28 @@ class TerminationCfg(BaseModel):
 
 class EvolutionCfg(BaseModel):
     """Controls when the idle-refinement loop triggers evolution."""
-    # Minimum number of *mature* hypotheses (>= 3 matches played) required
-    # before the supervisor schedules an EvolveTopHypotheses task.
-    # Default matches the original hardcoded value.
-    min_mature: int = 20
+    # Ordinary large-run gate: mature hypotheses have >= 3 matches.
+    # Small runs use the separately configured gate below.
+    streaming_enabled: bool = True
+    max_streaming_rounds: int = Field(4, ge=1, le=30)
+    min_mature: int = Field(20, ge=2)
     # How many top hypotheses to evolve per idle pass.
-    top_k: int = 5
+    top_k: int = Field(5, ge=2)
+    strategies: list[Literal["combine", "simplify", "feasibility", "out_of_box"]] = Field(
+        default_factory=lambda: ["combine", "simplify", "out_of_box"], min_length=1)
+    small_pool_enabled: bool = True
+    small_pool_max_initial: int = Field(10, ge=2)
+    small_pool_max_usd: float = Field(2.0, gt=0)
+    small_pool_min_candidates: int = Field(2, ge=2)
+    small_pool_mature_fraction: float = Field(0.5, gt=0, le=1)
+    small_pool_matches: int = Field(2, ge=1)
+    small_pool_min_remaining_fraction: float = Field(0.05, ge=0, lt=1)
+    small_pool_elo_gap: float = Field(10, ge=0)
+    small_pool_require_top_separation: bool = False
+    small_pool_require_top_stability: bool = False
+    small_pool_stability_snapshots: int = Field(3, ge=2, le=10)
+    small_pool_stability_top_k: int = Field(2, ge=1, le=10)
+    small_pool_stability_epsilon: float = Field(25, gt=0)
 
 
 class BudgetSharesCfg(BaseModel):
@@ -424,6 +455,7 @@ class Config(BaseModel):
     science_skills: ScienceSkillsCfg = Field(default_factory=ScienceSkillsCfg)
     embeddings: EmbeddingsCfg = Field(default_factory=EmbeddingsCfg)
     vectors: VectorsCfg = Field(default_factory=VectorsCfg)
+    generation: GenerationCfg = Field(default_factory=GenerationCfg)
     ranking: RankingCfg = Field(default_factory=RankingCfg)
     termination: TerminationCfg = Field(default_factory=TerminationCfg)
     evolution: EvolutionCfg = Field(default_factory=EvolutionCfg)

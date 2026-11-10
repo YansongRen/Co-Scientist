@@ -4,15 +4,15 @@ An open source re-implementation of Google's **AI co-scientist** ([Gottweis et a
 
 **It runs on an LLM API key or on your Claude Code / Codex subscription.** The default routes everything through **OpenRouter**, so one key reaches 200+ models from every vendor and `[models]` can mix them per agent. You can also point `[llm] provider` at Anthropic, OpenAI, or Gemini directly, or at a local `claude -p` / `codex exec` CLI that authenticates with its own OAuth login and bills nothing per token. Under the CLI backends, structured output and citation provenance come back through a bundled MCP server. Either way the agents are identical — see [LLM backend](#llm-backend).
 
-The agent roster, prompts, and control flow follow the paper. Source materials that were used to instruct the coding agent (mainly Claude Code) include:
+The agent roster follows the paper; runtime prompts and scheduling are independently implemented and extended here. Source materials that were used to instruct the coding agent (mainly Claude Code) include:
 
 - [`reference/8 Pseudocode of Co-Scientist agents`](reference/) — the supplementary pseudocode for Supervisor, Generation, Reflection, Ranking, Evolution, Proximity, Meta-review.
-- [`reference/9 Prompts for the specialized agents in .md`](reference/) — the per-agent prompts from the paper's supplement, used verbatim (modulo Jinja interpolation) in [`config/prompts/`](config/prompts/).
+- [`reference/9 Prompts for the specialized agents in .md`](reference/) — the per-agent prompts from the paper's supplement, used as source material for the adapted runtime templates in [`config/prompts/`](config/prompts/).
 - [`reference/AICoScientist-*.png`](reference/) — the architecture and component diagrams from the paper.
 
 The agents:
 
-- **Generation** — proposes hypotheses via literature review and simulated scientific debate.
+- **Generation** — one hypothesis per task using explicit literature, simulated debate, assumption-challenging, or feedback-driven prompt strategies.
 - **Reflection** — reviews hypotheses for novelty, correctness, and testability; deep-verifies the underlying assumptions.
 - **Ranking** — runs an Elo tournament with simulated debates between hypotheses.
 - **Evolution** — combines, simplifies, makes more feasible, or out-of-box-reimagines top-ranked hypotheses.
@@ -24,7 +24,6 @@ A **Supervisor** parses the goal into a research plan and schedules agent tasks 
 This is an independent re-implementation in Python on top of pluggable LLM provider SDKs — not affiliated with Google or the paper's authors.
 
 > [`docs/BENCH_RESULTS.md`](docs/BENCH_RESULTS.md) — every cross-model bench ever run on this code, with per-candidate Elo, every hypothesis produced, gold-set hits, and direct file pointers. Auto-generated from the bench DB.
-
 
 ## 本版本：科研网页与离线预览
 
@@ -46,10 +45,21 @@ python scripts/scoping_preview.py --port 7883
 - [阿里云与 systemd 部署](docs/deployment-aliyun.md)
 - [AlphaProtein Novo 适配与证据边界](docs/alphaprotein-novo-integration.md)
 
-本次上传前本地回归：**505 passed**；未进行新的付费 LLM、APN/AlphaFold 或实验验证。Mock 测试不能证明科研效果。
+本次交接前本地回归：**562 passed**（2026-11-10）；未进行新的付费 LLM、APN/AlphaFold 或实验验证。Mock 测试不能证明科研效果。
 
----
+交接入口：[开发约定](AGENTS.md)、[Cursor 交接说明](HANDOFF.md)。
 
+## Generation 多样性与小规模迭代
+
+Generation 的 `literature`、`debate`、`assumption`、`feedback_driven` 四种策略均已接入有界 Prompt 分派。`debate` 是单次 Generation 调用中的模拟多视角讨论；没有反馈时，`feedback_driven` 会明确记录 fallback 到 `assumption`，未知策略会报错。每个任务只允许一个 `record_hypothesis`；多个终结记录会被拒绝。
+
+Supervisor 按 `[generation].strategies` 的配置顺序循环分配初始任务，重复列表项可表示整数权重；空闲时还可以有限轮次补充 Generation。Generation 与 Evolution 共用 session 级 query-and-commit 锁，并在保存时执行容量检查。Proximity 更新相似簇标签，不删除假说；Ranking 实际使用这些标签优先比较不同方向。
+
+小规模初始池可使用可配置的比赛次数/成熟比例门槛，普通大规模运行仍保留 `min_mature=20`。最终报告和 Session metadata 记录策略、去重、Evolution、embedding backend 及覆盖率。Hash fallback 主要识别词汇重叠，不能可靠判定语义改写；未被去重不代表新颖。
+
+配置、准确语义、测试命令和局限见 [生成与迭代技术说明](docs/generation-and-refinement.md)。这些是软件机制和离线 Mock 验证，不代表真实 LLM 的科研表现已提升。
+
+局部候选就绪后，Supervisor 现在会在其他任务仍执行时安排 Evolution，新建 Session 默认启用 `[evolution].streaming_enabled`。任务固定父假说和评审版本，并以确定性 key、轮数及容量限制控制重复调度。详见 [局部就绪迭代说明](docs/generation-and-refinement.md#局部就绪迭代)。这消除了 Evolution 的全局空闲前置条件，单个假说的评审依赖及并发资源上限仍保留。
 
 ## Contents
 

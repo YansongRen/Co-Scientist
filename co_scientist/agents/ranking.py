@@ -230,7 +230,9 @@ class RankingAgent(BaseAgent):
     ) -> Hypothesis | None:
         if not pool:
             return None
-        return min(pool, key=lambda h: abs((h.elo or 1200) - (target.elo or 1200)))
+        return min(pool, key=lambda h: (
+            bool(target.dedup_cluster and target.dedup_cluster == h.dedup_cluster),
+            abs((h.elo or 1200) - (target.elo or 1200)), h.id))
 
     def _sample_close_elo(
         self, store: FaissStore | None, pool: list[Hypothesis]
@@ -248,7 +250,8 @@ class RankingAgent(BaseAgent):
                     continue
                 sim = self._similarity(store, a, b)
                 w_sim = 1.0 - (sim if sim is not None else 0.0)
-                w = float(np.exp(-d_elo / 200.0)) * max(w_sim, 0.05)
+                cluster_weight = 0.5 if a.dedup_cluster and a.dedup_cluster == b.dedup_cluster else 1.0
+                w = float(np.exp(-d_elo / 200.0)) * max(w_sim, 0.05) * cluster_weight
                 weights.append(w)
                 pairs.append((a, b, sim))
                 if len(pairs) >= 20:    # cap
@@ -274,8 +277,13 @@ class RankingAgent(BaseAgent):
             embedder = make_embedder(self.deps.cfg)
         except (RuntimeError, ValueError):
             return None
-        store = FaissStore(self.deps.cfg, session_id, dim=embedder.dim)
-        await store.load_or_create()
+        store = FaissStore(self.deps.cfg, session_id, dim=embedder.dim, model=embedder.model)
+        try:
+            await store.load_or_create()
+        except (OSError, ValueError, RuntimeError) as exc:
+            log.warning("ranking_similarity_unavailable_degraded_mode", session_id=session_id,
+                        error_type=type(exc).__name__)
+            return None
         if store.n == 0:
             return None
         return store

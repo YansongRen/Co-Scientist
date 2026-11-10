@@ -317,6 +317,9 @@ class MetaReviewAgent(BaseAgent):
         if not text.strip():
             text = "# Research overview\n\n_(No content was generated; see transcripts.)_"
 
+        from ..obs import diversity
+        diagnostics = await diversity.record(self.deps.cfg, self.deps.db, session.id)
+        text += "\n\n" + diversity.render(diagnostics) + "\n"
         overview_path = await write_text(
             self.deps.cfg, session.id, "final", "overview", ".md", text
         )

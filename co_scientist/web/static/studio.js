@@ -23,7 +23,7 @@
   function applyLaunchDefaults(){
     let saved={};try{saved=JSON.parse(localStorage.getItem('co-scientist-launch-limits')||'{}');}catch(_){/* Optional preferences. */}
     saved={...saved,...(state.launchOptions||{})};
-    const values={budget_usd:defaults.budget,budget_tokens:defaults.budget_tokens||500000,wall_clock_seconds:defaults.wall_clock,n_initial:2,research_mode:'lightweight',target_molecule:'unspecified',...saved};
+    const values={budget_usd:defaults.budget,budget_tokens:defaults.budget_tokens||500000,wall_clock_seconds:defaults.wall_clock,n_initial:2,concurrency:1,research_mode:'lightweight',target_molecule:'unspecified',...saved};
     Object.entries(values).forEach(([key,value])=>{if($('#launch-form').elements[key])$('#launch-form').elements[key].value=value;});
   }
   function rememberLaunch(){
@@ -206,7 +206,8 @@
     return items.map(a => `<button class="agent-item agent-link ${a.status === 'unused' ? 'unused' : ''}" data-agent="${a.agent}" aria-label="查看 ${agents[a.agent][0]} 动态"><span class="agent-glyph">${icon(agents[a.agent][2])}</span><span class="agent-label"><span class="agent-name">${agents[a.agent][0]}</span><span class="agent-role">${esc(state.runtime ? currentStep({...a,operations:a.operations || [],active_tasks:a.active_tasks || []}) : agents[a.agent][1])}</span></span><span class="agent-indicator">${a.status === 'running' ? '<i class="live-pulse"></i>' : a.status === 'done' ? icon('check') : ''}${['done','running'].includes(a.status) ? '' : d ? runtimeStatus(a.status) : '待命'}</span></button>`).join('');
   }
   function agentsView() {
-    return `<div class="monitor-heading"><div><h1 class="view-heading">Agent 动态</h1></div><span class="monitor-health ${state.runtimeError ? 'disconnected' : ''}" id="monitor-health"><i class="connection-dot"></i>${healthText()}</span></div><div id="monitor-content">${monitorContent()}</div>`;
+    queueMicrotask(updateMonitor);
+    return `<div class="monitor-heading"><div><h1 class="view-heading">Agent 动态</h1></div><span class="monitor-health ${state.runtimeError ? 'disconnected' : ''}" id="monitor-health"><i class="connection-dot"></i>${healthText()}</span></div><div id="agent-network"></div><div id="monitor-content">${monitorContent()}</div>`;
   }
   function eventInfo(e) {
     const p = e.payload || {};
@@ -242,6 +243,7 @@
     }).join('')}</div><section class="agent-focus"><div class="agent-focus-head"><div><h2>${agents[a.agent][0]} <span>· ${runtimeStatus(a.status)}</span></h2></div><span class="agent-focus-usage">${fmt(a.usage.tokens)} tokens<br>估算 ${money(a.usage.cost_usd)}</span></div>${a.active_tasks.map(task => `<div class="active-task"><span>当前任务</span><strong>${esc(actionName(task.action))}</strong><small>${esc(task.target_title || task.target_id || task.id)}${task.attempts ? ` · 第 ${task.attempts+1} 次尝试` : ''}</small></div>`).join('')}${a.operations.map(op => `<div class="operation-line">${icon(op.phase === 'tool_started' ? 'search' : 'activity')}<span>${esc(op.phase === 'tool_started' ? tools[op.tool] || op.tool : op.phase === 'llm_retry_wait' ? `正在等待重试：${op.error_type}` : `等待模型回复：${op.model}`)}${op.detail ? `<small>${esc(op.detail)}</small>` : ''}</span><time>${elapsed(op.started_at)}</time></div>`).join('')}<div class="agent-focus-stats"><span>已完成 <b>${a.counts.done}</b></span><span>排队 <b>${a.counts.pending}</b></span><span>任务重试 <b>${a.retries}</b></span><span>模型调用 <b>${a.usage.calls}</b></span></div><div class="agent-timeline-title">最近步骤 </div><div class="agent-timeline">${a.events.map(e => {const info = eventInfo(e); return `<div class="agent-event ${/failed/.test(e.event) ? 'event-failed' : ''}"><span class="event-pin">${icon(/failed/.test(e.event) ? 'x' : /completed|recorded/.test(e.event) ? 'check' : 'activity')}</span><div><strong>${esc(info.title)}</strong>${info.detail ? `<p>${esc(info.detail)}</p>` : ''}<small>${esc(e.task_id || '')}</small></div><time>${time(e.ts)}</time></div>`;}).join('') || `<div class="empty-state">${a.status === 'unused' ? '本轮没有触发此 Agent。' : !r.instrumented && a.last_task ? '此历史任务没有逐步事件记录；上方显示已保存的任务状态与模型用量。' : '还没有执行步骤，等待任务开始。'}</div>`}</div></section>`;
   }
   function updateMonitor() {
+    if ($('#agent-network')) window.AgentNetwork?.update($('#agent-network'), state.runtime, state.id, state.runtimeError);
     if ($('#monitor-content')) $('#monitor-content').innerHTML = monitorContent();
     if ($('#monitor-health')) {
       $('#monitor-health').innerHTML = `<i class="connection-dot"></i>${healthText()}`;
@@ -504,7 +506,7 @@
       if(state.launchDraft){
         const options=Object.fromEntries(body);
         delete options.goal; delete options.preferences;
-        ['budget_usd','budget_tokens','n_initial','wall_clock_seconds'].forEach(k=>options[k]=Number(options[k]));
+        ['budget_usd','budget_tokens','n_initial','wall_clock_seconds','concurrency'].forEach(k=>options[k]=Number(options[k]));
         result=await scoping.confirm(options);
       }else{
         const response = await fetch('/sessions/new', {method:'POST', body,headers:{Accept:'application/json'}});

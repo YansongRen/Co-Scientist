@@ -11,10 +11,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from .. import ids
 from ..logging import get_logger
 from ..models import Task, TaskResult
-from ..storage.repos import embeddings as emb_repo
 from ..storage.repos import hypotheses as hyp_repo
 from ..vectors.embedder import make_embedder
 from ..vectors.store import FaissStore
@@ -27,66 +25,44 @@ class ProximityAgent(BaseAgent):
     name = "proximity"
 
     async def execute(self, task: Task) -> TaskResult:
-        rebuild = bool(task.payload.get("rebuild", False))
-        session_id = task.session_id
+        # Batch repair/clustering uses the same session admission lock as saves.
+        from ..storage.artifacts import entity_lock
+        from ..vectors import admission
+        async with entity_lock(self.deps.cfg, task.session_id, admission.POOL_LOCK):
+            return await self._refresh(task)
 
+    async def _refresh(self, task):
+        from ..vectors import admission
+        sid = task.session_id
+        embedder = make_embedder(self.deps.cfg)
+        embedder, _ = await admission.embed_with_status(self.deps, sid, embedder, [])
         try:
-            embedder = make_embedder(self.deps.cfg)
-        except (RuntimeError, ValueError) as e:
-            log.warning("proximity_no_embedder", err=str(e))
-            return TaskResult(kind="noop", extra={"reason": "no embedder configured"})
-
-        store = FaissStore(self.deps.cfg, session_id, dim=embedder.dim)
-        await store.load_or_create()
-
-        hyps = await hyp_repo.list_for_session(self.deps.db, session_id)
-        # Identify hypotheses missing an embedding for this model. One query
-        # over the whole session instead of N has_embedding() probes.
-        rows = await emb_repo.list_for_session(self.deps.db, session_id)
-        existing_for_model = {
-            r["hypothesis_id"] for r in rows if r["model"] == embedder.model
-        }
-        to_embed = [h for h in hyps if h.id not in existing_for_model]
-
-        if to_embed:
-            await self._activity(task, "计算假设向量并更新索引", n_items=len(to_embed), model=embedder.model)
-            texts = [(h.title + "\n\n" + h.summary) for h in to_embed]
-            vecs = await embedder.embed(texts)
-            for h, v in zip(to_embed, vecs, strict=True):
-                offset = await store.add(h.id, v)
-                await emb_repo.upsert(
-                    self.deps.db,
-                    id_=ids.embedding_id(h.id, embedder.model),
-                    session_id=session_id,
-                    hypothesis_id=h.id,
-                    model=embedder.model,
-                    dim=embedder.dim,
-                    faiss_offset=offset,
-                    text_hash=ids.text_hash(h.title + "\n\n" + h.summary),
-                )
-            await store.save()
-            log.info("proximity_embedded", n_new=len(to_embed))
-
-        n_indexed = store.n
-        clusters_set = False
-        if rebuild and n_indexed >= 3:
-            await self._activity(task, "按相似性重新聚类", n_items=n_indexed)
-            try:
-                clusters = await self._cluster(store, threshold=self.deps.cfg.vectors.cluster_threshold)
-            except Exception as e:
-                log.warning("proximity_cluster_failed", err=str(e))
-                clusters = None
-            if clusters is not None:
-                for hid, cluster_id in clusters.items():
-                    await hyp_repo.set_dedup_cluster(self.deps.db, hid, cluster_id)
-                clusters_set = True
-                log.info("proximity_clustered", n_clusters=len(set(clusters.values())), n_indexed=n_indexed)
-
-        await self._activity(task, "相似性索引更新完成", n_items=n_indexed)
-        return TaskResult(
-            kind="proximity_updated",
-            extra={"n_indexed": n_indexed, "n_new": len(to_embed), "clustered": clusters_set},
-        )
+            store, n_new = await admission.synced_store(self.deps, sid, embedder)
+        except Exception as exc:
+            from ..vectors.embedder import HashEmbedder
+            if isinstance(embedder, HashEmbedder):
+                raise
+            log.warning("proximity_embedding_degraded_mode", error_type=type(exc).__name__, session_id=sid)
+            embedder, _ = await admission.embed_with_status(self.deps, sid, HashEmbedder(self.deps.cfg), [])
+            store, n_new = await admission.synced_store(self.deps, sid, embedder)
+        clusters = None
+        if task.payload.get("rebuild", False) and store.n >= 2:
+            await self._activity(task, "更新相似簇标记(不删除假说)", n_items=store.n)
+            clusters = await self._cluster(store, threshold=self.deps.cfg.vectors.cluster_threshold)
+            if clusters:
+                for hid, cluster in clusters.items():
+                    await hyp_repo.set_dedup_cluster(self.deps.db, hid, cluster)
+        sizes = {}
+        for label in (clusters or {}).values():
+            sizes[label] = sizes.get(label, 0) + 1
+        similar = sum(n for n in sizes.values() if n > 1)
+        await admission.note(self.deps, sid, "proximity_refreshed", indexed=store.n,
+            clusters=len(sizes), similar_hypotheses=similar, backend=embedder.model,
+            behavior="labels_only_no_deletion")
+        return TaskResult(kind="proximity_updated", extra={"n_indexed": store.n, "n_new": n_new,
+            "clustered": clusters is not None, "n_clusters": len(sizes), "similar_hypotheses": similar,
+            "backend": embedder.model, "hash_fallback": embedder.model == "hash-fallback",
+            "behavior": "labels_only_no_deletion"})
 
     # ----------------------------- clustering ----------------------------- #
 

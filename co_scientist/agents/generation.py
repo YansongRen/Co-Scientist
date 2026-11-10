@@ -1,16 +1,12 @@
 """Generation agent — proposes new hypotheses.
 
-M3 ships the `literature` strategy. `debate` / `assumption` / `feedback_driven`
-hook into the same machinery and land in M5+.
+Four explicit bounded prompt strategies; each task registers one hypothesis.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable
-from datetime import UTC, datetime
 from typing import Any
-
-import numpy as np
 
 from .. import ids
 from ..llm.prompts import render
@@ -18,18 +14,18 @@ from ..llm.routing import route
 from ..llm.tool_loop import ToolLoopExhausted, run_tool_loop
 from ..llm.types import AgentCallSpec, CachedBlock, CallContext
 from ..logging import get_logger
-from ..models import CitedPaper, Hypothesis, ResearchPlan, Task, TaskResult
+from ..models import CitedPaper, ResearchPlan, Task, TaskResult
 from ..safety.evidence import NOVELTY_POLICY, annotate_record, audit_summary, infer_molecule
 from ..safety.quoting import quote_untrusted
 from ..science.alphaprotein_novo import AlphaProteinNovoAdapter
-from ..storage.artifacts import entity_lock, read_json, write_json
-from ..storage.repos import embeddings as emb_repo
+from ..storage.artifacts import read_json
 from ..storage.repos import feedback as fb_repo
 from ..storage.repos import hypotheses as hyp_repo
 from ..storage.repos import sessions as sess_repo
+from ..vectors import admission
 from ..vectors.embedder import make_embedder
-from ..vectors.store import FaissStore
 from .base import AgentDeps, BaseAgent
+from .generation_strategies import DIVERSITY, STRATEGIES, pool_context, resolve_strategy
 from .schemas import RECORD_HYPOTHESIS_TOOL
 
 log = get_logger("generation")
@@ -39,17 +35,21 @@ class GenerationAgent(BaseAgent):
     name = "generation"
 
     async def execute(self, task: Task) -> TaskResult:
-        strategy = task.payload.get("strategy", "literature")
-        n_target = int(task.payload.get("n", 3))
+        requested_strategy = task.payload.get("strategy", "literature")
+        if task.payload.get("n", 1) != 1:
+            raise ValueError("Each Generation task must request exactly one hypothesis")
+        feedback = await _latest_system_feedback(self.deps, task.session_id)
+        feedback = feedback[:self.deps.cfg.generation.feedback_chars] if feedback else None
+        strategy, fallback = resolve_strategy(requested_strategy, feedback)
+        if fallback:
+            log.warning("generation_strategy_fallback", requested=requested_strategy, effective=strategy)
+            await admission.note(self.deps, task.session_id, "generation_strategy_fallback",
+                requested=requested_strategy, effective=strategy, reason=fallback)
 
         session = await sess_repo.fetch(self.deps.db, task.session_id)
         if session is None:
             raise RuntimeError(f"session {task.session_id} missing")
         plan = session.research_plan
-
-        if strategy != "literature":
-            # M3 ships only the literature strategy.
-            raise NotImplementedError(f"strategy {strategy!r} lands in a later milestone")
 
         # 1. Render the prompt and run the tool loop with `record_hypothesis` available.
         articles_block = (
@@ -62,11 +62,11 @@ class GenerationAgent(BaseAgent):
         )
 
         prompt = render(
-            "generation.literature",
+            STRATEGIES[strategy].template,
             goal=plan.objective,
             preferences="; ".join(plan.preferences),
             articles_with_reasoning=articles_block,
-            instructions=(
+            instructions=(STRATEGIES[strategy].instruction + "\n" + DIVERSITY + "\n" + (fallback or "") + "\n" +
                 "Propose ONE hypothesis (the strongest you can justify) and "
                 "register it via the record_hypothesis tool. For each citation, label its "
                 "relation, support_level and study scope; include a verbatim excerpt "
@@ -77,19 +77,21 @@ class GenerationAgent(BaseAgent):
                 "of queries, then commit."
             ),
         )
-        _ = n_target  # n_target controls how many parallel Generation tasks are enqueued, not per-call output
+        prompt += "\n\n# Existing pool (untrusted summaries)\n" + await pool_context(self.deps, session.id)
+        if feedback:
+            prompt += "\n\n# Available feedback\n" + quote_untrusted(feedback, id_="generation-feedback")
 
         sys_blocks = [
             CachedBlock(self._system_prompt_header(), cache=True),
             CachedBlock(
                 _build_session_context(session.research_goal, plan,
-                                       await _latest_system_feedback(self.deps, session.id)),
+                                       feedback),
                 cache=True,
             ),
         ]
         user_blocks = [CachedBlock(prompt, cache=False)]
 
-        r = route(self.deps.cfg, "generation", "literature")
+        r = route(self.deps.cfg, "generation", strategy)
         tools = [*self.deps.tools.anthropic_tools_for("generation"), RECORD_HYPOTHESIS_TOOL]
 
         spec = AgentCallSpec(
@@ -106,7 +108,7 @@ class GenerationAgent(BaseAgent):
         )
         ctx = CallContext(
             session_id=task.session_id, task_id=task.id,
-            agent="generation", action="CreateInitialHypotheses", mode="literature",
+            agent="generation", action=task.action, mode=strategy,
         )
 
         try:
@@ -123,6 +125,11 @@ class GenerationAgent(BaseAgent):
             raise RuntimeError(f"generation exhausted tool loop: {e}") from e
 
         # 2. Extract record_hypothesis from the final assistant message.
+        records = [b for b in loop_result.response.raw.content or []
+                   if getattr(b, "type", None) == "tool_use" and getattr(b, "name", "") == "record_hypothesis"]
+        captured_count = sum(c.get("name") == "record_hypothesis" for c in loop_result.tool_calls)
+        if len(records) > 1 or captured_count > 1:
+            raise ValueError("Generation permits only one record_hypothesis per task")
         record = self._final_tool_use(loop_result.response, "record_hypothesis")
         if record is None:
             raise RuntimeError("Generation did not call record_hypothesis")
@@ -134,153 +141,37 @@ class GenerationAgent(BaseAgent):
         record["parent_ids"] = []  # Generation has no inherited hypotheses.
 
         # 4. Persist + embed + dedup-check.
-        hid, was_new = await self._persist(session.id, record, strategy="literature")
-        exact = hid == ids.hypothesis_id(session.id, "generation/literature", record.get("statement") or record.get("title") or "")
+        hid, was_new = await self._persist(session.id, record, strategy=strategy)
+        exact = hid == ids.hypothesis_id(session.id, f"generation/{strategy}", record.get("statement") or record.get("title") or "")
         if not was_new and exact:
             existing = await hyp_repo.fetch(self.deps.db, hid)
             record = (await read_json(self.deps.cfg, existing.artifact_path))["record"]
-        request = _valid_protein_design_request(self.deps, record.get("protein_design_request"))
+        request = _valid_protein_design_request(self.deps, record.get("protein_design_request")) if exact else None
         if request is not None and exact:
             request["hypothesis_id"] = hid
         return TaskResult(
             kind="hypothesis_created",
             hypothesis_ids=[hid] if was_new or exact else [],
-            extra={"tool_calls": loop_result.tool_calls, "iterations": loop_result.iterations,
+            extra={"requested_strategy": requested_strategy, "effective_strategy": strategy, "fallback_reason": fallback,
+                   "tool_calls": loop_result.tool_calls, "iterations": loop_result.iterations,
                    "protein_design_request": request,
                    "protein_design_requests": [request] if request else []},
         )
 
     # ---------------------------------------------------------------- #
 
-    async def _persist(
-        self, session_id: str, record: dict[str, Any], *, strategy: str
-    ) -> tuple[str, bool]:
-        statement = record.get("statement") or record.get("title") or ""
-        hid = ids.hypothesis_id(session_id, f"generation/{strategy}", statement)
-        async with entity_lock(self.deps.cfg, session_id, hid):
-            if await hyp_repo.fetch(self.deps.db, hid):
-                return hid, False
-            return await self._persist_new(session_id, record, strategy=strategy)
+    async def _persist(self, session_id: str, record: dict[str, Any], *, strategy: str) -> tuple[str | None, bool]:
+        citations = [CitedPaper(title=c.get("title", ""), url=c["url"], excerpt=c.get("excerpt"),
+            doi=c.get("doi"), year=c.get("year")) for c in record.get("citations", [])
+            if isinstance(c, dict) and c.get("url")]
+        return await admission.publish(self, session_id, record, strategy, _render_hypothesis_md, citations)
 
-    async def _persist_new(
-        self, session_id: str, record: dict[str, Any], *, strategy: str
-    ) -> tuple[str, bool]:
-        statement = record.get("statement") or record.get("title") or ""
-        if not statement:
-            raise ValueError("record_hypothesis: missing statement")
+    async def _dedup_query(self, session_id, text):
+        return await admission.query(self.deps, session_id, text, make_embedder)
 
-        origin = f"generation/{strategy}"
-        hid = ids.hypothesis_id(session_id, origin, statement)
-        summary = (record.get("statement") or "") + "\n\n" + (record.get("mechanism") or "")
-        full_text = _render_hypothesis_md(record)
+    async def _dedup_commit(self, session_id, hypothesis_id, payload):
+        await admission.commit(self.deps, session_id, hypothesis_id, payload)
 
-        # Write the JSON artifact first so the row points at a real file.
-        artifact_path = await write_json(
-            self.deps.cfg, session_id, "hypotheses", hid,
-            {"strategy": strategy, "record": record},
-        )
-
-        citations = [
-            CitedPaper(
-                title=c.get("title", ""),
-                url=c.get("url", ""),
-                excerpt=c.get("excerpt"),
-                doi=c.get("doi"),
-                year=c.get("year"),
-            )
-            for c in record.get("citations", [])
-            if isinstance(c, dict) and c.get("url")
-        ]
-
-        # Step 1: embed + near-neighbour check (does NOT mutate FAISS).
-        try:
-            dup_id, embed_payload = await self._dedup_query(session_id, summary)
-        except Exception as e:
-            log.warning("dedup_query_failed", err=str(e))
-            dup_id, embed_payload = None, None
-
-        if dup_id is not None and dup_id != hid:
-            # Found a near-duplicate already in this session: skip insert + skip FAISS.
-            return dup_id, False
-
-        # Step 2: insert the hypothesis row. Deterministic IDs make this idempotent.
-        h = Hypothesis(
-            id=hid,
-            session_id=session_id,
-            created_at=datetime.now(UTC),
-            created_by="generation",
-            strategy=strategy,        # type: ignore[arg-type]
-            parent_ids=record.get("parent_ids") or [],
-            title=record.get("title", "")[:300],
-            summary=(record.get("statement") or "")[:1000],
-            full_text=full_text,
-            citations=citations,
-            artifact_path=artifact_path,
-            state="draft",
-        )
-        inserted = await hyp_repo.insert(self.deps.db, h)
-
-        # Step 3: only add to FAISS if we actually inserted a new row, so FAISS and
-        # the hypotheses table can never disagree (FK in embeddings_meta enforces it).
-        if inserted and embed_payload is not None:
-            try:
-                await self._dedup_commit(session_id, hid, embed_payload)
-            except Exception as e:
-                log.warning("dedup_commit_failed", hypothesis_id=hid, err=str(e))
-
-        return hid, inserted
-
-    async def _dedup_query(
-        self, session_id: str, text: str
-    ) -> tuple[str | None, dict[str, Any] | None]:
-        """Read-only: embed + nearest-neighbour search. No FAISS mutation.
-
-        Returns (existing_duplicate_id_or_None, embed_payload_for_later_commit).
-        """
-        try:
-            embedder = make_embedder(self.deps.cfg)
-        except (RuntimeError, ValueError):
-            return None, None
-        vec = await embedder.embed([text])
-        if vec.size == 0:
-            return None, None
-        v = vec[0]
-        store = FaissStore(self.deps.cfg, session_id, dim=embedder.dim)
-        await store.load_or_create()
-        nearest = await store.search(np.asarray(v), k=1)
-        thr = self.deps.cfg.vectors.dedup_cosine_threshold
-        if nearest and nearest[0][1] >= thr:
-            return nearest[0][0], None
-        payload = {
-            "vector": np.asarray(v),
-            "model": embedder.model,
-            "dim": embedder.dim,
-            "text_hash": ids.text_hash(text),
-        }
-        return None, payload
-
-    async def _dedup_commit(
-        self, session_id: str, hypothesis_id: str, payload: dict[str, Any]
-    ) -> None:
-        """Write-side of dedup: add to FAISS + register the embedding."""
-        store = FaissStore(self.deps.cfg, session_id, dim=payload["dim"])
-        await store.load_or_create()
-        offset = await store.add(hypothesis_id, payload["vector"])
-        await store.save()
-        await emb_repo.upsert(
-            self.deps.db,
-            id_=ids.embedding_id(hypothesis_id, payload["model"]),
-            session_id=session_id,
-            hypothesis_id=hypothesis_id,
-            model=payload["model"],
-            dim=payload["dim"],
-            faiss_offset=offset,
-            text_hash=payload["text_hash"],
-        )
-
-
-# --------------------------------------------------------------------------- #
-# helpers
 
 
 def _filter_to_seen_urls(

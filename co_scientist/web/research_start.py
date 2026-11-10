@@ -10,9 +10,9 @@ from pydantic import BaseModel, Field, model_validator
 
 from .. import ids
 from .. import inputs as user_inputs
+from ..logging import get_logger
 from ..models import ResearchPlan, Session
 from ..models.scoping import ResearchBrief
-from ..logging import get_logger
 from ..safety.evidence import infer_molecule
 from ..storage import db
 from ..storage.repos import events, sessions
@@ -24,6 +24,7 @@ class LaunchOptions(BaseModel):
     budget_usd: float = Field(1, gt=0, le=25, allow_inf_nan=False)
     budget_tokens: int | None = Field(None, ge=1000, le=10000000)
     upload_group_id: str | None = Field(None, pattern=r"^inp_[a-f0-9]{32}$")
+    concurrency: int = Field(1, ge=1, le=4)
     n_initial: int = Field(2, ge=1, le=20)
     wall_clock_seconds: int = Field(600, ge=60, le=7200)
     research_mode: Literal["standard", "lightweight"] = "lightweight"
@@ -42,10 +43,10 @@ def config_for_launch(cfg, options):
     if options.budget_tokens is not None:
         cfg.run.budget_tokens = options.budget_tokens
     cfg.run.wall_clock_seconds = options.wall_clock_seconds
+    cfg.run.concurrency = options.concurrency
     cfg.run.research_mode = options.research_mode
     cfg.run.target_molecule = options.target_molecule
     if options.research_mode == "lightweight":
-        cfg.run.concurrency = 1
         cfg.run.max_ideas = min(cfg.run.max_ideas, 6)
     return cfg
 

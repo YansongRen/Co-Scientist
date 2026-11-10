@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from itertools import combinations
 
 
@@ -14,6 +15,7 @@ async def eligible_pairs(conn, session_id, candidates, *, pair_cap=3, idea_cap=1
              and a.matches_played < idea_cap and b.matches_played < idea_cap]
     return sorted(pairs, key=lambda pair: (
         counts.get(tuple(sorted((pair[0].id, pair[1].id))), 0),
+        bool(pair[0].dedup_cluster and pair[0].dedup_cluster == pair[1].dedup_cluster),
         pair[0].matches_played + pair[1].matches_played,
         abs((pair[0].elo or 1200) - (pair[1].elo or 1200)),
         sorted((pair[0].id, pair[1].id))))
@@ -28,8 +30,32 @@ async def pool_revision(conn, session_id, hypotheses):
     return hashlib.sha256(body.encode()).hexdigest()[:20]
 
 
+def maturity_decision(cfg, hypotheses, *, session=None, n_initial=None, has_pairs=True):
+    """Configurable small-pool gate; Elo separation is not scientific validity."""
+    evo = cfg.evolution
+    initial = n_initial or len(hypotheses)
+    total_budget = session.budget_usd if session else cfg.run.budget_usd
+    small = evo.small_pool_enabled and (initial <= evo.small_pool_max_initial or (
+        0 < total_budget <= evo.small_pool_max_usd and len(hypotheses) <= evo.small_pool_max_initial))
+    matches = evo.small_pool_matches if small else 3
+    if small and cfg.run.research_mode == "lightweight":
+        matches = min(matches, cfg.ranking.lightweight_max_pair_matches)
+    reference_size = initial if initial <= evo.small_pool_max_initial else len(hypotheses)
+    required = max(evo.small_pool_min_candidates, math.ceil(reference_size * evo.small_pool_mature_fraction)) if small else evo.min_mature
+    mature = [h for h in hypotheses if h.matches_played >= matches and h.elo is not None]
+    ranked = sorted(mature, key=lambda h: -h.elo)
+    separated = len(ranked) >= 2 and ranked[0].elo - ranked[1].elo >= evo.small_pool_elo_gap
+    budget_ok = True
+    if session:
+        remaining = evo.small_pool_min_remaining_fraction
+        budget_ok = ((session.budget_usd <= 0 or session.budget_used_usd < session.budget_usd * (1-remaining))
+            and (session.budget_tokens <= 0 or session.budget_used_tokens < session.budget_tokens * (1-remaining)))
+    ready = (len(hypotheses) >= 2 and len(mature) >= required and budget_ok
+             and (not small or not evo.small_pool_require_top_separation or separated))
+    return {"ready": ready, "small_pool": small, "required_mature": required,
+            "matches_per_mature": matches, "mature": len(mature), "has_eligible_pairs": has_pairs,
+            "top_separated": separated, "budget_ok": budget_ok}
+
+
 def adaptive_maturity(cfg, hypotheses):
-    required = min(cfg.evolution.min_mature, len(hypotheses))
-    matches = min(3, cfg.ranking.lightweight_max_pair_matches)
-    mature = sum(h.matches_played >= matches for h in hypotheses)
-    return len(hypotheses) >= 2 and mature >= max(2, required)
+    return maturity_decision(cfg, hypotheses)["ready"]

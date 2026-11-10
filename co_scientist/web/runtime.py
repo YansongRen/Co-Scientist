@@ -109,6 +109,18 @@ async def runtime_snapshot(cfg, conn, session):
             "active_tasks": active if live else [], "last_task": own_tasks[0] if own_tasks else None,
             "operations": own_ops, "events": [e for e in recent if e["agent"] == agent],
             "usage": usage.get(agent, {"calls": 0, "tokens": 0, "cost_usd": 0})})
+    async with conn.execute("""SELECT e.id,e.ts,e.payload FROM events e
+            WHERE e.session_id=? AND e.event='task_handoff' ORDER BY e.id DESC LIMIT 80""", (session.id,)) as cur:
+        handoffs = []
+        allowed = {"source_agent", "destination_agent", "source_task_id", "destination_task_id", "hypothesis_id", "kind", "delivery"}
+        for row in await cur.fetchall():
+            payload = json.loads(row["payload"] or "{}")
+            handoffs.append({"id": row["id"], "ts": row["ts"], **{k:v for k,v in payload.items() if k in allowed}})
+    run = session.config_snapshot.get("run", {})
     return {"server_time": int(time.time() * 1000), "session_status": session.status,
+            "handoffs": list(reversed(handoffs)), "session_id": session.id,
+            "execution": {"concurrency": run.get("concurrency"),
+                "active_tasks": sum(len(a["active_tasks"]) for a in result),
+                "active_agents": sum(a["status"] == "running" for a in result[:6])},
             "agents": result[:6], "coordinator": result[6],
             "instrumented": any(e["event"].startswith(("llm_", "tool_")) for e in recent)}

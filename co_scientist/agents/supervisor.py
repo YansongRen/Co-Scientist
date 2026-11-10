@@ -7,7 +7,7 @@ Responsibilities:
 4. Apply follow-up scheduling rules after each task completes.
 5. Periodically run `decide_next_steps` when the queue is idle:
    - Tournament refinement.
-   - Evolution if the leaderboard is stable.
+   - Configurable maturity-gated Evolution and bounded strategy Generation.
    - Periodic system-feedback meta-reviews.
 6. Check the termination predicate after every task; on stop, cancel pending
    work and run a single final meta-review for the overview.
@@ -130,15 +130,7 @@ class Supervisor:
                 session = await sess_repo.fetch(conn, session.id)
                 assert session is not None
 
-                for i in range(n_initial):
-                    await task_repo.enqueue(conn, Task(
-                        id=ids.task_id(), session_id=session.id,
-                        created_at=datetime.now(UTC),
-                        agent="generation", action="CreateInitialHypotheses",
-                        payload={"strategy": "literature", "n": 1},
-                        priority=100, status="pending",
-                        idempotency_key=f"{session.id}::generation::initial::{i}",
-                    ))
+                await self._enqueue_initial_generation(conn, session, n_initial)
             else:
                 session = await sess_repo.fetch(conn, resume_session_id)
                 if session is None:
@@ -289,6 +281,8 @@ class Supervisor:
         last_decide_at = 0.0
         last_snapshot_match_count = -1
         last_reclaim_at = 0.0
+        progress = asyncio.Event()
+        progress.set()  # recover already-ready candidates after a process restart
 
         async def _run_task(t: Task) -> None:
             # A transaction/cursor belongs to one worker, never to concurrent
@@ -332,6 +326,7 @@ class Supervisor:
                         await conn.commit()
                     await self._apply_follow_ups(conn, session, t, result)
                     await task_repo.complete(conn, t.id)
+                    progress.set()
                 except asyncio.CancelledError:
                     await conn.execute("UPDATE tasks SET status='cancelled',finished_at=? WHERE id=? AND status IN ('leased','in_progress')",
                                        (datetime.now(UTC).isoformat(), t.id))
@@ -382,6 +377,12 @@ class Supervisor:
                             await asyncio.gather(*inflight, return_exceptions=True)
                             inflight.clear()
                         return stop
+
+                # Ready work is evaluated after completions, even while unrelated
+                # workers are still busy. Use the scheduler-owned connection.
+                if progress.is_set():
+                    progress.clear()
+                    await self._schedule_ready_refinement(conn, refreshed or session)
 
                 # Refill worker slots.
                 slots_open = self.cfg.run.concurrency - len(inflight)
@@ -460,16 +461,36 @@ class Supervisor:
         task: Task,
         result,
     ) -> None:
+        async def enqueue_follow(next_task):
+            inserted = await task_repo.enqueue(conn, next_task)
+            if inserted:
+                await events_repo.emit(conn, session_id=session.id, task_id=task.id,
+                    agent="supervisor", event="task_handoff", payload={
+                        "source_agent": task.agent, "destination_agent": next_task.agent,
+                        "source_task_id": task.id, "destination_task_id": next_task.id,
+                        "hypothesis_id": next_task.target_id,
+                        "kind": result.kind, "delivery": "queued"})
+            return inserted
+
         if result.kind == "hypothesis_created":
             for hid in result.hypothesis_ids:
-                await task_repo.enqueue(conn, Task(
+                await enqueue_follow(Task(
                     id=ids.task_id(), session_id=session.id,
                     created_at=datetime.now(UTC),
                     agent="reflection", action="ReviewHypothesis",
                     target_id=hid, payload={"kind": "full"},
-                    priority=100, status="pending",
+                    priority=75, status="pending",
                     idempotency_key=f"{hid}::review::full",
                 ))
+            if result.hypothesis_ids:
+                async with conn.execute("SELECT COUNT(*) FROM hypotheses WHERE session_id=?", (session.id,)) as cur:
+                    pool_size = (await cur.fetchone())[0]
+                if pool_size >= 2:
+                    bucket = pool_size // self.cfg.vectors.proximity_refresh_interval
+                    await enqueue_follow(Task(id=ids.task_id(), session_id=session.id,
+                        created_at=datetime.now(UTC), agent="proximity", action="UpdateProximityGraph",
+                        payload={"rebuild": True}, priority=90,
+                        idempotency_key=f"{session.id}::proximity::pool::{bucket}"))
             requests = result.extra.get("protein_design_requests") or []
             singular = result.extra.get("protein_design_request")
             if singular and not requests:
@@ -481,7 +502,7 @@ class Supervisor:
                     await self._enqueue_protein_design_request(conn, session, target_id, request)
         elif result.kind == "review_completed":
             for hid in result.hypothesis_ids:
-                await task_repo.enqueue(conn, Task(
+                await enqueue_follow(Task(
                     id=ids.task_id(), session_id=session.id,
                     created_at=datetime.now(UTC),
                     agent="ranking", action="AddToTournament",
@@ -490,12 +511,12 @@ class Supervisor:
                 ))
         elif result.kind == "added_to_tournament":
             for hid in result.hypothesis_ids:
-                await task_repo.enqueue(conn, Task(
+                await enqueue_follow(Task(
                     id=ids.task_id(), session_id=session.id,
                     created_at=datetime.now(UTC),
                     agent="ranking", action="RunTournamentBatch",
                     target_id=None,
-                    payload={"focus": hid}, priority=120, status="pending",
+                    payload={"focus": hid}, priority=85, status="pending",
                     idempotency_key=f"{hid}::ranking::focus_batch",
                 ))
         elif result.kind == "tournament_match_complete":
@@ -509,7 +530,7 @@ class Supervisor:
                 mc > 0
                 and mc % self.cfg.vectors.full_recluster_every_matches == 0
             ):
-                await task_repo.enqueue(conn, Task(
+                await enqueue_follow(Task(
                     id=ids.task_id(), session_id=session.id,
                     created_at=datetime.now(UTC),
                     agent="proximity", action="UpdateProximityGraph",
@@ -521,7 +542,7 @@ class Supervisor:
             # The existing Reflection agent is the consumer of scientific
             # evidence; Evolution then sees the resulting review as usual.
             for hid in result.hypothesis_ids:
-                await task_repo.enqueue(conn, Task(
+                await enqueue_follow(Task(
                     id=ids.task_id(), session_id=session.id,
                     created_at=datetime.now(UTC), agent="reflection",
                     action="ReviewHypothesis", target_id=hid,
@@ -540,12 +561,170 @@ class Supervisor:
 
         return await enqueue_design(self.cfg, session.id, hypothesis_id, raw_request)
 
+    async def _enqueue_initial_generation(self, conn, session, n_initial):
+        from ..storage.artifacts import entity_lock
+        from .generation_strategies import allocate
+        async with entity_lock(self.cfg, session.id, "generation-allocation"):
+            count = min(max(0, n_initial), self.cfg.run.max_ideas)
+            session.config_snapshot.setdefault("research_execution", {})["n_initial"] = count
+            await conn.execute("UPDATE sessions SET config_snapshot=? WHERE id=?",
+                (json.dumps(session.config_snapshot), session.id))
+            await conn.commit()
+            inserted = 0
+            for i, strategy in enumerate(allocate(self.cfg, count)):
+                inserted += int(await task_repo.enqueue(conn, Task(id=ids.task_id(), session_id=session.id,
+                    created_at=datetime.now(UTC), agent="generation", action="CreateInitialHypotheses",
+                    payload={"strategy": strategy, "n": 1, "generation_round": "initial", "batch_index": i},
+                    priority=100, idempotency_key=f"{session.id}::generation::initial::{i}")))
+            return inserted
+
+    def _remaining_budget(self, session):
+        deadline = session.wall_deadline
+        if deadline is not None and deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=UTC)  # match existing termination rules
+        return ((session.budget_tokens <= 0 or session.budget_used_tokens < session.budget_tokens)
+            and (session.budget_usd <= 0 or session.budget_used_usd < session.budget_usd)
+            and (deadline is None or datetime.now(UTC) < deadline))
+
+    async def _schedule_idle_generation(self, conn, session):
+        from .generation_strategies import allocate
+        if not self.cfg.generation.idle_enabled or not self._remaining_budget(session):
+            return 0
+        async with conn.execute("SELECT payload,status FROM tasks WHERE session_id=? AND agent='generation' ORDER BY rowid", (session.id,)) as cur:
+            rows = await cur.fetchall()
+        # No spontaneous bootstrap of imported or synthetic sessions.
+        initial = [r for r in rows if json.loads(r["payload"]).get("generation_round") == "initial"]
+        if not initial:
+            return 0
+        pool = await hyp_repo.list_for_session(conn, session.id)
+        space = self.cfg.run.max_ideas - len(pool)
+        if space <= 0:
+            return 0
+        for round_index in range(self.cfg.generation.max_idle_rounds):
+            earlier = [r for r in rows if json.loads(r["payload"]).get("generation_round") == round_index]
+            if earlier:
+                if any(r["status"] in ("pending", "leased", "in_progress") for r in earlier):
+                    return 0
+                continue
+            count = min(space, self.cfg.generation.idle_batch_size)
+            offset = len(rows)
+            inserted = 0
+            for i, strategy in enumerate(allocate(self.cfg, count, offset=offset)):
+                inserted += int(await task_repo.enqueue(conn, Task(id=ids.task_id(), session_id=session.id,
+                    created_at=datetime.now(UTC), agent="generation", action="CreateInitialHypotheses",
+                    payload={"strategy": strategy, "n": 1, "generation_round": round_index, "batch_index": i},
+                    priority=160, idempotency_key=f"{session.id}::generation::idle::{round_index}::{i}")))
+            return inserted
+        return 0
+
+    async def _maturity(self, conn, session, pool, *, has_pairs=True):
+        from ..orchestrator.research_policy import maturity_decision
+        async with conn.execute("SELECT COUNT(*) FROM tasks WHERE session_id=? AND agent='generation' AND idempotency_key LIKE ?",
+            (session.id, f"{session.id}::generation::initial::%")) as cur:
+            initial = (await cur.fetchone())[0]
+        initial = initial or session.config_snapshot.get("research_execution", {}).get("n_initial") or session.config_snapshot.get("web_launch", {}).get("n_initial") or len(pool)
+        gate = maturity_decision(self.cfg, pool, session=session, n_initial=initial, has_pairs=has_pairs)
+        from ..orchestrator.termination import EloSnapshot
+        evo = self.cfg.evolution
+        snap = await snapshot_top_k(conn, session.id, evo.small_pool_stability_top_k)
+        async with conn.execute("SELECT payload FROM events WHERE session_id=? AND event='evolution_maturity_observed' ORDER BY rowid DESC LIMIT ?",
+            (session.id, evo.small_pool_stability_snapshots)) as cur:
+            history = [json.loads(r[0]) for r in await cur.fetchall()]
+        current = {"match_count": snap.match_count, "top_ids": list(snap.top_ids),
+                   "top_elos": list(snap.top_elos), "pool_size": snap.pool_size}
+        if not history or history[0] != current:
+            await self._emit(conn, session.id, "evolution_maturity_observed", current)
+            history.insert(0, current)
+        tracker = StabilityTracker(evo.small_pool_stability_top_k, evo.small_pool_stability_snapshots,
+                                   evo.small_pool_stability_epsilon)
+        unique = []
+        seen_counts = set()
+        for item in history:
+            if item["match_count"] not in seen_counts:
+                unique.append(item)
+                seen_counts.add(item["match_count"])
+        for item in reversed(unique[:evo.small_pool_stability_snapshots]):
+            tracker.push(EloSnapshot(**item))
+        gate["top_stable"] = len(snap.top_ids) >= min(2, len(pool)) and tracker.is_stable()
+        if gate["small_pool"] and evo.small_pool_require_top_stability and not gate["top_stable"]:
+            gate["ready"] = False
+        return gate
+
+    def _streaming_enabled(self, session):
+        # New sessions snapshot this policy. Do not silently change the cost /
+        # scheduling contract of historical runs when they are resumed.
+        return self.cfg.evolution.streaming_enabled and session.config_snapshot.get("evolution", {}).get("streaming_enabled", False)
+
+    async def _schedule_ready_refinement(self, conn, session):
+        """Local maturity -> immutable parent/review snapshot, no global barrier."""
+        import hashlib
+
+        from ..storage.artifacts import entity_lock
+        if not self._streaming_enabled(session):
+            return 0
+        async with entity_lock(self.cfg, session.id, "idle-scheduling"):
+            current = await sess_repo.fetch(conn, session.id)
+            if not current or current.status != "running" or not self._remaining_budget(current):
+                return 0
+            async with conn.execute("SELECT status,payload FROM tasks WHERE session_id=? AND agent='evolution'", (session.id,)) as cur:
+                existing = await cur.fetchall()
+            if any(r["status"] in ("pending", "leased", "in_progress") for r in existing):
+                return 0
+            rounds = sum(json.loads(r["payload"]).get("scheduling") == "ready" for r in existing)
+            if rounds >= self.cfg.evolution.max_streaming_rounds:
+                return 0
+            all_hyps = await hyp_repo.list_for_session(conn, session.id)
+            if len(all_hyps) >= self.cfg.run.max_ideas:
+                return 0
+            pool = [h for h in all_hyps if h.state in ("in_tournament", "pinned")]
+            gate = await self._maturity(conn, current, pool)
+            if not gate["ready"]:
+                return 0
+            ready = [h for h in pool if h.matches_played >= gate["matches_per_mature"]]
+            ready.sort(key=lambda h: (-(h.elo if h.elo is not None else 1200), h.id))
+            parents, review_ids = [], {}
+            for h in ready:
+                reviews = await rev_repo.reasoning_reviews(self.cfg, conn, await rev_repo.list_for_hypothesis(conn, h.id))
+                if reviews:
+                    parents.append(h.id)
+                    review_ids[h.id] = reviews[0].id
+                if len(parents) >= self.cfg.evolution.top_k:
+                    break
+            if len(parents) < max(2, min(gate["required_mature"], self.cfg.evolution.top_k)):
+                return 0
+            # Rank ordering / incidental Elo fluctuations do not create rounds.
+            revision = hashlib.sha256(json.dumps(sorted(review_ids.items())).encode()).hexdigest()[:24]
+            task = Task(id=ids.task_id(), session_id=session.id, created_at=datetime.now(UTC),
+                agent="evolution", action="EvolveTopHypotheses", priority=90,
+                payload={"scheduling": "ready", "parent_ids": parents, "parent_review_ids": review_ids,
+                    "top_k": len(parents), "strategies": self.cfg.evolution.strategies,
+                    "maturity": gate, "candidate_revision": revision},
+                idempotency_key=f"{session.id}::evolution::ready::{revision}")
+            inserted = await task_repo.enqueue(conn, task)
+            if inserted:
+                await self._emit(conn, session.id, "task_handoff", {
+                    "source_agent": "supervisor", "destination_agent": "evolution",
+                    "source_task_id": None, "destination_task_id": task.id,
+                    "kind": "mature_candidates_ready", "delivery": "queued",
+                    "parent_ids": parents, "parent_review_ids": review_ids,
+                    "round": rounds+1})
+            return int(inserted)
+
     # ----------------------------- decide_next_steps ----------------------------- #
 
     async def _decide_next_steps(
         self, conn: aiosqlite.Connection, session: Session
     ) -> int:
-        """When the queue empties: refill it with refinement work. Returns # enqueued."""
+        from ..storage.artifacts import entity_lock
+        async with entity_lock(self.cfg, session.id, "idle-scheduling"):
+            current = await sess_repo.fetch(conn, session.id)
+            if current:
+                session = current
+            if session.status != "running" or not self._remaining_budget(session):
+                return 0
+            return await self._refine_idle(conn, session)
+
+    async def _refine_idle(self, conn, session):
         from ..storage.repos import tournaments as tourney_repo
 
         if self.cfg.run.research_mode == "lightweight":
@@ -577,8 +756,12 @@ class Supervisor:
 
         # If the leaderboard has matured, evolve. The maturity gate and top_k are
         # config-driven so deep runs can lower the gate to grow the pool faster.
-        mature = sum(1 for h in in_tournament if h.matches_played >= 3)
-        if mature >= self.cfg.evolution.min_mature:
+        from ..orchestrator.research_policy import pool_revision
+        gate = await self._maturity(conn, session, in_tournament)
+        all_hyps = await hyp_repo.list_for_session(conn, session.id)
+        revision = await pool_revision(conn, session.id, in_tournament)
+        evolution_scheduled = False
+        if not self._streaming_enabled(session) and gate["ready"] and len(all_hyps) < self.cfg.run.max_ideas:
             inserted = await task_repo.enqueue(conn, Task(
                 id=ids.task_id(), session_id=session.id,
                 created_at=datetime.now(UTC),
@@ -586,12 +769,14 @@ class Supervisor:
                 target_id=None,
                 payload={
                     "top_k": self.cfg.evolution.top_k,
-                    "strategies": ["combine", "simplify", "out_of_box"],
+                    "strategies": self.cfg.evolution.strategies,
+                    "maturity": gate,
                 },
                 priority=140, status="pending",
-                idempotency_key=f"{session.id}::evolution::idle::{anchor_mc}",
+                idempotency_key=f"{session.id}::evolution::pool::{revision}",
             ))
             enqueued += int(inserted)
+            evolution_scheduled = inserted
 
         # Periodic meta-review (every ~5 minutes wall, approximated by match count).
         mc = await tourney_repo.count_matches(conn, session.id)
@@ -613,11 +798,12 @@ class Supervisor:
             ))
             enqueued += int(inserted)
 
+        if not evolution_scheduled:
+            enqueued += await self._schedule_idle_generation(conn, session)
         return enqueued
 
     async def _decide_lightweight(self, conn, session) -> int:
         from ..orchestrator.research_policy import (
-            adaptive_maturity,
             eligible_pairs,
             pool_revision,
         )
@@ -629,12 +815,13 @@ class Supervisor:
         pool = await hyp_repo.list_for_session(conn, session.id, state="in_tournament")
         all_hyps = await hyp_repo.list_for_session(conn, session.id)
         if len(pool) < 2:
-            return 0
+            return await self._schedule_idle_generation(conn, session)
         pairs = await eligible_pairs(conn, session.id, pool,
             pair_cap=self.cfg.ranking.lightweight_max_pair_matches,
             idea_cap=self.cfg.run.max_matches_per_idea)
         revision = await pool_revision(conn, session.id, pool)
-        ready = adaptive_maturity(self.cfg, pool)
+        gate = await self._maturity(conn, session, pool, has_pairs=bool(pairs))
+        ready = gate["ready"]
 
         async def schedule(agent, action, key, payload=None):
             return int(await task_repo.enqueue(conn, Task(
@@ -649,14 +836,19 @@ class Supervisor:
             await self._emit(conn, session.id, "research_policy", {
                 "label": "比较已足够; 先汇总证据缺口与系统反馈"})
             return 1
-        if (ready and len(all_hyps) < self.cfg.run.max_ideas
+        if (not self._streaming_enabled(session) and ready and len(all_hyps) < self.cfg.run.max_ideas
                 and await schedule("evolution", "EvolveTopHypotheses", f"evolve::{revision}", {
                     "top_k": min(self.cfg.evolution.top_k, len(pool)),
-                    "strategies": ["combine", "simplify"],
+                    "strategies": self.cfg.evolution.strategies[:2],
+                    "maturity": gate,
                 })):
             await self._emit(conn, session.id, "research_policy", {
                 "label": "小样本成熟门槛已达到; 根据反馈演化假设"})
             return 1
+        if not ready or not pairs:
+            generated = await self._schedule_idle_generation(conn, session)
+            if generated:
+                return generated
         if pairs:
             count = await tourney_repo.count_matches(conn, session.id)
             # Include invalid matches in the key, as they also consume the pair
@@ -767,7 +959,9 @@ class Supervisor:
                         f"t={r.scores.testability})"
                     )
             parts.append("")
-        body = "\n".join(parts)
+        from ..obs import diversity
+        diagnostics = await diversity.record(self.cfg, conn, session.id)
+        body = "\n".join(parts) + "\n\n" + diversity.render(diagnostics) + "\n"
         return await write_text(self.cfg, session.id, "final", "overview", ".md", body)
 
     # ----------------------------- helpers ----------------------------- #

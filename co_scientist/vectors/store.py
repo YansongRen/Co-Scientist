@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import hashlib
 import json
 import os
 from contextlib import contextmanager
@@ -22,12 +23,16 @@ from ..logging import get_logger
 
 
 class FaissStore:
-    def __init__(self, cfg: Config, session_id: str, dim: int) -> None:
+    def __init__(self, cfg: Config, session_id: str, dim: int, *, model: str | None = None) -> None:
         self.cfg = cfg
         self.session_id = session_id
         self.dim = dim
         self.index: faiss.IndexFlatIP | None = None
         self._dir = cfg.session_vector_dir(session_id)
+        self.model = model
+        if model is not None:
+            # Equal dimensions do not imply compatible vector spaces.
+            self._dir = self._dir / "models" / hashlib.sha256(model.encode()).hexdigest()[:20]
         self._index_path = self._dir / "index.faiss"
         self._meta_path = self._dir / "index.meta.json"
         self._ordered_ids: list[str] = []   # hypothesis_id at each faiss offset
@@ -51,7 +56,9 @@ class FaissStore:
         """
         self._dir.mkdir(parents=True, exist_ok=True)
 
-        def _do() -> tuple[faiss.IndexFlatIP, list[str], int | None]:
+        def _read() -> tuple[faiss.IndexFlatIP, list[str], int | None]:
+            if self._index_path.exists() != self._meta_path.exists():
+                raise ValueError("Incomplete FAISS cache pair; rebuild from hypotheses")
             if self._index_path.exists() and self._meta_path.exists():
                 idx = faiss.read_index(str(self._index_path))
                 meta = json.loads(self._meta_path.read_text())
@@ -59,11 +66,20 @@ class FaissStore:
                 # wrote it, and predates this check on older indices.
                 stored_dim = getattr(idx, "d", None) or meta.get("dim")
                 if stored_dim == self.dim:
-                    return idx, list(meta.get("ordered_ids", [])), None
+                    ordered = list(meta.get("ordered_ids", []))
+                    if idx.ntotal != len(ordered) or len(set(ordered)) != len(ordered):
+                        raise ValueError("FAISS index/metadata inconsistent; rebuild derived index")
+                    return idx, ordered, None
                 return faiss.IndexFlatIP(self.dim), [], stored_dim
             return faiss.IndexFlatIP(self.dim), [], None
 
-        self.index, self._ordered_ids, discarded_dim = await asyncio.to_thread(_do)
+        def _do():
+            # Readers must not observe the gap between the two atomic replaces.
+            with self._disk_lock():
+                return _read()
+
+        async with self._lock:
+            self.index, self._ordered_ids, discarded_dim = await asyncio.to_thread(_do)
         if discarded_dim is not None:
             get_logger("vectors.store").warning(
                 "faiss_index_dim_mismatch_rebuilding",
@@ -131,8 +147,12 @@ class FaissStore:
     async def add(self, hypothesis_id: str, vec: np.ndarray) -> int:
         """Append one vector. Returns its FAISS offset."""
         assert self.index is not None
+        vec = np.asarray(vec, dtype="float32")
         if vec.ndim == 1:
             vec = vec[None, :]
+        if vec.shape != (1, self.dim) or not np.isfinite(vec).all() or np.linalg.norm(vec) == 0:
+            raise ValueError("Invalid embedding vector")
+        vec = vec / np.linalg.norm(vec, axis=1, keepdims=True)
 
         def _do() -> int:
             with self._disk_lock():

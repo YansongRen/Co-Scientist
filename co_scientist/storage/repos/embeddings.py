@@ -32,6 +32,7 @@ async def upsert(
            VALUES (?,?,?,?,?,?,?,?)
            ON CONFLICT(hypothesis_id, model) DO UPDATE
               SET faiss_offset=excluded.faiss_offset,
+                  dim=excluded.dim,
                   text_hash=excluded.text_hash,
                   created_at=excluded.created_at""",
         (id_, session_id, hypothesis_id, model, dim, faiss_offset, text_hash, _now()),

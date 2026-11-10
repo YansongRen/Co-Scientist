@@ -12,10 +12,7 @@ cascades into Reflection → Ranking like any fresh idea.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Any, Literal
-
-import numpy as np
 
 from .. import ids
 from ..llm.prompts import render
@@ -27,13 +24,13 @@ from ..models import CitedPaper, Hypothesis, Task, TaskResult
 from ..safety.evidence import NOVELTY_POLICY, annotate_record, audit_summary, infer_molecule
 from ..safety.quoting import quote_hypothesis
 from ..science.alphaprotein_novo import AlphaProteinNovoAdapter
-from ..storage.artifacts import entity_lock, read_json, write_json
-from ..storage.repos import embeddings as emb_repo
+from ..storage.artifacts import read_json
 from ..storage.repos import feedback as fb_repo
 from ..storage.repos import hypotheses as hyp_repo
 from ..storage.repos import reviews as rev_repo
 from ..storage.repos import scientific_evidence as scientific_evidence_repo
 from ..storage.repos import sessions as sess_repo
+from ..vectors import admission
 from ..vectors.embedder import make_embedder
 from ..vectors.store import FaissStore
 from .base import AgentDeps, BaseAgent
@@ -48,26 +45,46 @@ class EvolutionAgent(BaseAgent):
     name = "evolution"
 
     async def execute(self, task: Task) -> TaskResult:
-        strategies: list[EvoStrategy] = task.payload.get("strategies") or [
-            "combine", "simplify", "out_of_box"
-        ]
+        strategies: list[EvoStrategy] = task.payload.get("strategies") or self.deps.cfg.evolution.strategies
+        if any(s not in ("combine", "simplify", "feasibility", "out_of_box") for s in strategies):
+            raise ValueError("Unsupported Evolution strategy")
         top_k = int(task.payload.get("top_k", 5))
 
         session = await sess_repo.fetch(self.deps.db, task.session_id)
         if session is None:
             raise RuntimeError(f"session {task.session_id} missing")
 
-        top = await hyp_repo.top_by_elo(self.deps.db, session.id, k=top_k)
+        self._frozen_reviews = None
+        if "parent_ids" in task.payload:
+            parent_ids = task.payload["parent_ids"]
+            review_ids = task.payload.get("parent_review_ids", {})
+            if not isinstance(parent_ids, list) or len(parent_ids) < 2 or len(set(parent_ids)) != len(parent_ids):
+                raise ValueError("Evolution requires distinct parent IDs")
+            found = {h.id: h for h in await hyp_repo.fetch_many(self.deps.db, parent_ids)}
+            if any(hid not in found or found[hid].session_id != session.id for hid in parent_ids):
+                raise ValueError("Evolution parent/session mismatch")
+            top = [found[hid] for hid in parent_ids]
+            self._frozen_reviews = {}
+            for h in top:
+                reviews = await rev_repo.reasoning_reviews(self.deps.cfg, self.deps.db,
+                    await rev_repo.list_for_hypothesis(self.deps.db, h.id))
+                review = next((r for r in reviews if r.id == review_ids.get(h.id)), None)
+                if h.state not in ("in_tournament", "pinned") or review is None:
+                    return TaskResult(kind="noop", extra={"reason": "parent snapshot no longer admissible"})
+                self._frozen_reviews[h.id] = review.body
+        else:
+            top = await hyp_repo.top_by_elo(self.deps.db, session.id, k=top_k)
         if len(top) < 2:
             return TaskResult(kind="noop", extra={"reason": "need at least 2 top hypotheses"})
 
         new_ids: list[str] = []
         design_requests: list[dict[str, Any]] = []
+        attempted = []
         for strat in strategies:
-            if self.deps.cfg.run.research_mode == "lightweight":
-                current = await hyp_repo.list_for_session(self.deps.db, session.id)
-                if len(current) >= self.deps.cfg.run.max_ideas:
-                    break
+            current = await hyp_repo.list_for_session(self.deps.db, session.id)
+            if len(current) >= self.deps.cfg.run.max_ideas:
+                break
+            attempted.append(strat)
             await self._activity(task, "正在根据反馈演化假设", strategy=strat,
                                  hypothesis_ids=[h.id for h in top])
             try:
@@ -84,7 +101,9 @@ class EvolutionAgent(BaseAgent):
             kind="hypothesis_created",
             hypothesis_ids=new_ids,
             extra={
-                "strategies_used": strategies,
+                "strategies_used": attempted,
+                "parent_ids": [h.id for h in top],
+                "parent_review_ids": task.payload.get("parent_review_ids", {}),
                 "protein_design_requests": design_requests,
                 # Keep the singular key for older Supervisor integrations.
                 "protein_design_request": design_requests[0] if len(design_requests) == 1 else None,
@@ -240,111 +259,17 @@ class EvolutionAgent(BaseAgent):
             design_request["hypothesis_id"] = hid
         return (hid if was_new or exact else None), (design_request if was_new or exact else None)
 
-    async def _persist(
-        self, session_id: str, record: dict[str, Any], *, strategy: str
-    ) -> tuple[str, bool]:
-        statement = record.get("statement") or record.get("title") or ""
-        hid = ids.hypothesis_id(session_id, f"evolution/{strategy}", statement)
-        async with entity_lock(self.deps.cfg, session_id, hid):
-            if await hyp_repo.fetch(self.deps.db, hid):
-                return hid, False
-            return await self._persist_new(session_id, record, strategy=strategy)
+    async def _persist(self, session_id: str, record: dict[str, Any], *, strategy: str) -> tuple[str | None, bool]:
+        citations = [CitedPaper(title=c.get("title", ""), url=c["url"], excerpt=c.get("excerpt"),
+            doi=c.get("doi"), year=c.get("year")) for c in record.get("citations", [])
+            if isinstance(c, dict) and c.get("url")]
+        return await admission.publish(self, session_id, record, strategy, _render_hypothesis_md, citations)
 
-    async def _persist_new(
-        self, session_id: str, record: dict[str, Any], *, strategy: str
-    ) -> tuple[str, bool]:
-        statement = record.get("statement") or record.get("title") or ""
-        if not statement:
-            raise ValueError("evolution: record_hypothesis is missing statement")
-        origin = f"evolution/{strategy}"
-        hid = ids.hypothesis_id(session_id, origin, statement)
-        summary = (record.get("statement") or "") + "\n\n" + (record.get("mechanism") or "")
-        full_text = _render_hypothesis_md(record)
+    async def _dedup_query(self, session_id, text):
+        return await admission.query(self.deps, session_id, text, make_embedder)
 
-        artifact_path = await write_json(
-            self.deps.cfg, session_id, "hypotheses", hid,
-            {"strategy": strategy, "record": record},
-        )
-        citations = [
-            CitedPaper(
-                title=c.get("title", ""), url=c.get("url", ""),
-                excerpt=c.get("excerpt"), doi=c.get("doi"), year=c.get("year"),
-            )
-            for c in record.get("citations", [])
-            if isinstance(c, dict) and c.get("url")
-        ]
-
-        # Dedup: cheap nearest-neighbour query. Same pattern as Generation.
-        try:
-            dup_id, embed_payload = await self._dedup_query(session_id, summary)
-        except Exception as e:
-            log.warning("evolution_dedup_query_failed", err=str(e))
-            dup_id, embed_payload = None, None
-
-        if dup_id is not None and dup_id != hid:
-            return dup_id, False
-
-        h = Hypothesis(
-            id=hid, session_id=session_id, created_at=datetime.now(UTC),
-            created_by="evolution", strategy=strategy,        # type: ignore[arg-type]
-            parent_ids=record.get("parent_ids") or [],
-            title=record.get("title", "")[:300],
-            summary=(record.get("statement") or "")[:1000],
-            full_text=full_text,
-            citations=citations,
-            artifact_path=artifact_path,
-            state="draft",
-        )
-        inserted = await hyp_repo.insert(self.deps.db, h)
-
-        if inserted and embed_payload is not None:
-            try:
-                await self._dedup_commit(session_id, hid, embed_payload)
-            except Exception as e:
-                log.warning("evolution_dedup_commit_failed", hypothesis_id=hid, err=str(e))
-
-        return hid, inserted
-
-    # ----------------------------- helpers ----------------------------- #
-
-    async def _dedup_query(
-        self, session_id: str, text: str
-    ) -> tuple[str | None, dict[str, Any] | None]:
-        try:
-            embedder = make_embedder(self.deps.cfg)
-        except (RuntimeError, ValueError):
-            return None, None
-        vec = await embedder.embed([text])
-        if vec.size == 0:
-            return None, None
-        v = vec[0]
-        store = FaissStore(self.deps.cfg, session_id, dim=embedder.dim)
-        await store.load_or_create()
-        nearest = await store.search(np.asarray(v), k=1)
-        thr = self.deps.cfg.vectors.dedup_cosine_threshold
-        if nearest and nearest[0][1] >= thr:
-            return nearest[0][0], None
-        return None, {
-            "vector": np.asarray(v),
-            "model": embedder.model,
-            "dim": embedder.dim,
-            "text_hash": ids.text_hash(text),
-        }
-
-    async def _dedup_commit(
-        self, session_id: str, hypothesis_id: str, payload: dict[str, Any]
-    ) -> None:
-        store = FaissStore(self.deps.cfg, session_id, dim=payload["dim"])
-        await store.load_or_create()
-        offset = await store.add(hypothesis_id, payload["vector"])
-        await store.save()
-        await emb_repo.upsert(
-            self.deps.db,
-            id_=ids.embedding_id(hypothesis_id, payload["model"]),
-            session_id=session_id, hypothesis_id=hypothesis_id,
-            model=payload["model"], dim=payload["dim"],
-            faiss_offset=offset, text_hash=payload["text_hash"],
-        )
+    async def _dedup_commit(self, session_id, hypothesis_id, payload):
+        await admission.commit(self.deps, session_id, hypothesis_id, payload)
 
     async def _most_distant_pair(
         self, session_id: str, top: list[Hypothesis]
@@ -355,7 +280,7 @@ class EvolutionAgent(BaseAgent):
             embedder = make_embedder(self.deps.cfg)
         except (RuntimeError, ValueError):
             return top[0], top[1]
-        store = FaissStore(self.deps.cfg, session_id, dim=embedder.dim)
+        store = FaissStore(self.deps.cfg, session_id, dim=embedder.dim, model=embedder.model)
         await store.load_or_create()
         if store.n == 0:
             return top[0], top[1]
@@ -377,6 +302,8 @@ class EvolutionAgent(BaseAgent):
         return best or (top[0], top[1])
 
     async def _best_review(self, hypothesis_id: str) -> str | None:
+        if getattr(self, "_frozen_reviews", None) is not None:
+            return self._frozen_reviews.get(hypothesis_id)
         return await rev_repo.best_for_reasoning(self.deps.cfg, self.deps.db, hypothesis_id)
 
     async def _latest_feedback(self, session_id: str) -> str | None:

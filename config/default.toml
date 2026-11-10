@@ -34,10 +34,23 @@ provider = "voyage"                  # voyage | openai | hash
 model = "voyage-3-large"
 dim = 1024
 
+# Deterministic round-robin; repeating a strategy provides integer weights.
+[generation]
+strategies = ["literature", "debate", "assumption", "feedback_driven"]
+context_chars = 6000
+context_hypotheses = 16
+feedback_chars = 4000
+idle_enabled = true
+idle_batch_size = 1
+max_idle_rounds = 2
+
 [vectors]
 backend = "faiss"
 dedup_cosine_threshold = 0.92
-cluster_threshold = 0.15
+cluster_threshold = 0.15           # cosine distance, not similarity
+mark_duplicates = true             # pre-save block; clustering never deletes rows
+proximity_refresh_interval = 3     # pool-size buckets; first refresh at >= 2
+embedding_timeout_seconds = 30
 full_recluster_every_matches = 20
 
 [ranking]
@@ -64,12 +77,29 @@ min_ideas_before_stable = 0
 min_matches_before_stable = 0
 
 [evolution]
-# Minimum number of *mature* hypotheses (>= 3 matches played) before the
-# supervisor schedules an evolution pass.  Lower this for deep runs where
-# the pool size is larger than the default 60-idea session.
+streaming_enabled = true
+max_streaming_rounds = 4
+# Ordinary large-run threshold (>= 3 matches per mature hypothesis).
+# Small runs use the separate configurable gate below.
 min_mature = 20
 # How many top hypotheses to evolve per idle pass.
 top_k = 5
+strategies = ["combine", "simplify", "out_of_box"]
+# Small initial pools, or budget <= small_pool_max_usd with a small current
+# pool, can evolve without 20 mature candidates. Large runs retain min_mature.
+small_pool_enabled = true
+small_pool_max_initial = 10
+small_pool_max_usd = 2.0
+small_pool_min_candidates = 2
+small_pool_mature_fraction = 0.5
+small_pool_matches = 2
+small_pool_min_remaining_fraction = 0.05
+small_pool_elo_gap = 10
+small_pool_require_top_separation = false
+small_pool_require_top_stability = false
+small_pool_stability_snapshots = 3
+small_pool_stability_top_k = 2
+small_pool_stability_epsilon = 25
 
 [budget_shares]
 generation = 0.20
