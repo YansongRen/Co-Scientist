@@ -84,6 +84,16 @@
 </section>
 
 <section>
+    <h2>Your hypothesis</h2>
+    <form method="POST" action="/api/sessions/{{ session.id }}/hypotheses">
+        <fieldset role="group">
+            <input type="text" name="text" minlength="20" maxlength="4000" placeholder="A testable hypothesis to review and rank" required>
+            <button type="submit">Add to review</button>
+        </fieldset>
+    </form>
+</section>
+
+<section>
     <h2>Feedback</h2>
     <form method="POST" action="/api/sessions/{{ session.id }}/feedback"
           hx-post="/api/sessions/{{ session.id }}/feedback" hx-swap="none">

@@ -4,10 +4,9 @@ Two actions:
 - `AddToTournament(hypothesis_id)` — initialize Elo + state. No LLM call.
 - `RunTournamentBatch(focus_id?)` — pick a pair, debate, parse verdict, apply Elo.
 
-Pair selection mixes new-arrival pairings, similar-Elo pairs (weighted toward
-embedding-distant ones for information gain), and an occasional random pull.
-Debate mode is preferred when matches are new or Elo gap is small; pairwise
-otherwise.
+Pair selection prefers similar hypotheses, using the proximity cluster and
+embedding similarity, then close Elo. A debate match takes a bounded number of
+turns when the hypotheses are new or close in Elo. A pairwise match stays one turn.
 """
 
 from __future__ import annotations
@@ -178,6 +177,10 @@ class RankingAgent(BaseAgent):
             pairs = await eligible_pairs(self.deps.db, session_id, candidates,
                 pair_cap=self.deps.cfg.ranking.lightweight_max_pair_matches,
                 idea_cap=self.deps.cfg.run.max_matches_per_idea)
+            if focus_id:
+                focused = [pair for pair in pairs if focus_id in {pair[0].id, pair[1].id}]
+                if focused:
+                    pairs = focused
             if not pairs:
                 return None
             a, b = pairs[0]
@@ -209,8 +212,8 @@ class RankingAgent(BaseAgent):
             if b is not None:
                 return a, b, self._similarity(store, a, b)
 
-        # Bucket 2: similar-Elo pair within the warm set, weighted by (1 - cosine_similarity)
-        # so we prefer pairs that are *distant in idea-space* — debate over differing approaches.
+        # Bucket 2: similar-Elo pair within the warm set, weighted toward
+        # high cosine similarity so similar hypotheses debate each other.
         if r < cfg.p_new + cfg.p_close and len(warm) >= 2:
             pair = self._sample_close_elo(store, warm)
             if pair is not None:
@@ -231,7 +234,7 @@ class RankingAgent(BaseAgent):
         if not pool:
             return None
         return min(pool, key=lambda h: (
-            bool(target.dedup_cluster and target.dedup_cluster == h.dedup_cluster),
+            not bool(target.dedup_cluster and target.dedup_cluster == h.dedup_cluster),
             abs((h.elo or 1200) - (target.elo or 1200)), h.id))
 
     def _sample_close_elo(
@@ -249,8 +252,8 @@ class RankingAgent(BaseAgent):
                 if d_elo > 200:
                     continue
                 sim = self._similarity(store, a, b)
-                w_sim = 1.0 - (sim if sim is not None else 0.0)
-                cluster_weight = 0.5 if a.dedup_cluster and a.dedup_cluster == b.dedup_cluster else 1.0
+                w_sim = sim if sim is not None else 0.05
+                cluster_weight = 2.0 if a.dedup_cluster and a.dedup_cluster == b.dedup_cluster else 1.0
                 w = float(np.exp(-d_elo / 200.0)) * max(w_sim, 0.05) * cluster_weight
                 weights.append(w)
                 pairs.append((a, b, sim))
@@ -352,15 +355,44 @@ class RankingAgent(BaseAgent):
             "notes": "Be decisive. End your response with the line: better idea: <1 or 2>",
         }
         prompt = render(template, **prompt_kwargs)
+        turns = self.deps.cfg.ranking.debate_turns if mode == "debate" else 1
+        turns = max(1, min(int(turns), 4))
+        parts: list[str] = []
+        transcript_id = None
+        for index in range(turns):
+            user = prompt
+            if parts:
+                user += "\n\n# Earlier debate turns\n" + "\n\n".join(parts)
+            if index < turns - 1:
+                user += (
+                    "\n\nThis is an intermediate turn of a simulated scientific debate. "
+                    "State one disagreement about novelty, correctness, or testability. "
+                    "Do not write the final winner line."
+                )
+            text, transcript_id = await self._ranking_text(session, user, mode=mode)
+            parts.append(text[:2000])
+        text = "\n\n".join(parts)
+        choice = _parse_better_idea(parts[-1] if parts else "")
+        if choice is None:
+            return None, text, transcript_id
 
+        # Map anchor/opponent choice back to (a, b)
+        # "1" means anchor, "2" means opponent.
+        if anchor_is_a:
+            winner: Literal["a", "b"] = "a" if choice == 1 else "b"
+        else:
+            winner = "b" if choice == 1 else "a"
+        return winner, text, transcript_id
+
+    async def _ranking_text(self, session, prompt: str, *, mode: PairMode) -> tuple[str, str | None]:
+        plan = session.research_plan
         r = route(self.deps.cfg, "ranking", "debate" if mode == "debate" else "pairwise")
-
         system = [
             CachedBlock(self._system_prompt_header(), cache=True),
             CachedBlock(
                 f"# Research goal\n{session.research_goal}\n\n"
                 f"# Preferences\n{'; '.join(plan.preferences)}\n\n"
-                "Conclude every response with the exact line `better idea: 1` or "
+                "When this is the final turn, conclude with the exact line `better idea: 1` or "
                 "`better idea: 2`. No other format. Do not call any tools.",
                 cache=True,
             ),
@@ -379,18 +411,7 @@ class RankingAgent(BaseAgent):
             agent="ranking", action="RunTournamentBatch", mode=mode,
         )
         resp = await self.deps.llm.call(spec, ctx)
-        text = self._final_text(resp)
-        choice = _parse_better_idea(text)
-        if choice is None:
-            return None, text, resp.transcript_id
-
-        # Map anchor/opponent choice back to (a, b)
-        # "1" means anchor, "2" means opponent.
-        if anchor_is_a:
-            winner: Literal["a", "b"] = "a" if choice == 1 else "b"
-        else:
-            winner = "b" if choice == 1 else "a"
-        return winner, text, resp.transcript_id
+        return self._final_text(resp), resp.transcript_id
 
     async def _best_review(self, hypothesis_id: str) -> str | None:
         return await rev_repo.best_for_reasoning(self.deps.cfg, self.deps.db, hypothesis_id)

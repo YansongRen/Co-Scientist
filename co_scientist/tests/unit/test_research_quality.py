@@ -48,8 +48,8 @@ def test_quote_matching_is_separate_from_scientific_support_and_scope():
     assert card["quote_status"] == "quote_found"
     assert card["retrieval_level"] == "abstract"
     assert card["semantic_status"] == "needs_human_review"
-    assert card["source_molecule"] == "RNA"
-    assert card["scope_warning"]
+    assert card["relation"] == "supports"
+    assert not card["scope_warning"]
 
 
 def test_full_quote_must_match_and_failed_fetch_is_not_evidence():
@@ -65,7 +65,7 @@ def test_full_quote_must_match_and_failed_fetch_is_not_evidence():
 async def seed(conn, *, matches=3):
     now = datetime.now(UTC)
     session = Session(id="quality-session", created_at=now, updated_at=now, status="running",
-        research_goal="Study nanopore DNA sequencing", research_plan=ResearchPlan(objective="Test"),
+        research_goal="Study a measurement discrepancy", research_plan=ResearchPlan(objective="Test"),
         config_snapshot={}, budget_tokens=10000, budget_usd=1)
     await sessions.insert(conn, session)
     pool = []
@@ -120,7 +120,7 @@ async def test_saturated_pairs_do_not_block_new_candidate_comparisons(tmp_cfg, c
 async def test_generation_persists_audit_and_safe_novelty_prompt(tmp_cfg, conn, monkeypatch):
     now = datetime.now(UTC)
     await sessions.insert(conn, Session(id="generation-test", created_at=now, updated_at=now,
-        status="running", research_goal="nanopore DNA sequencing",
+        status="running", research_goal="Compare two measurement explanations",
         research_plan=ResearchPlan(objective="Test", target_molecule="DNA"), config_snapshot={},
         budget_tokens=1000, budget_usd=1))
     record = {"title": "Test", "statement": "A test hypothesis", "mechanism": "Test",
@@ -144,11 +144,11 @@ async def test_generation_persists_audit_and_safe_novelty_prompt(tmp_cfg, conn, 
     artifact = await read_json(tmp_cfg, h.artifact_path)
     assert artifact["record"]["novelty_assessment"]["status"] == "unverified"
     assert artifact["record"]["evidence_audit"][0]["quote_status"] == "quote_found"
-    assert artifact["record"]["evidence_audit"][0]["scope_warning"]
+    assert not artifact["record"]["evidence_audit"][0]["scope_warning"]
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(tmp_cfg)), base_url="http://test") as client:
         data = (await client.get("/api/studio/sessions/generation-test")).json()
     assert data["evidence"]["summary"]["quotes_matched"] == 1
-    assert data["evidence"]["summary"]["scope_warnings"] == 1
+    assert data["evidence"]["summary"]["scope_warnings"] == 0
 
 
 @pytest.mark.asyncio
@@ -170,14 +170,13 @@ async def test_launch_mode_is_bounded_and_validation_does_not_start_research(tmp
             assert response.status_code == 422
         assert launched == []
         response = await client.post("/sessions/new", data={"goal": "Test", "n_initial": 2,
-            "research_mode": "lightweight", "target_molecule": "DNA", "budget_usd": 1})
+            "research_mode": "lightweight", "budget_usd": 1})
         assert response.status_code == 303
         await asyncio.wait_for(ready.wait(), 1)
     cfg, kwargs = launched[0]
     assert cfg.run.concurrency == 1
     assert cfg.run.max_ideas == 6
-    assert cfg.run.target_molecule == "DNA"
-    assert "Research scope: DNA" in kwargs["preferences_text"]
+    assert "preferences_text" in kwargs
     assert tmp_cfg.run.research_mode == "standard"  # per-run settings cannot leak
 
 

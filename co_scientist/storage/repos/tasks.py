@@ -6,7 +6,6 @@ Lease TTL is set by the caller.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import time
 from datetime import UTC, datetime
@@ -119,28 +118,9 @@ async def complete(conn: aiosqlite.Connection, task_id: str) -> None:
 
 
 async def approve(conn: aiosqlite.Connection, task_id: str) -> bool:
-    """Release a human-reviewed scientific task into the normal queue."""
-    async with conn.execute("SELECT payload FROM tasks WHERE id=? AND action='RunProteinDesign' AND status='awaiting_approval'", (task_id,)) as cur:
-        row = await cur.fetchone()
-    if row is None:
-        return False
-    payload = json.loads(row["payload"])
-    from ...science.alphaprotein_novo import input_fingerprint
-    digest = input_fingerprint(payload["manifest_path"])
-    if payload.get("input_sha256") != digest:
-        raise ValueError("scientific inputs changed; submit a new request for review")
-    approval = approval_digest(payload, digest)
-    cur = await conn.execute(
-        "UPDATE tasks SET status='pending',approval_sha256=? WHERE id=? AND status='awaiting_approval' AND payload=?",
-        (approval, task_id, row["payload"]),
-    )
-    changed = cur.rowcount > 0
-    await conn.commit()
-    return changed
-
-
-def approval_digest(payload: dict, input_sha256: str) -> str:
-    return hashlib.sha256((json.dumps(payload, sort_keys=True) + input_sha256).encode()).hexdigest()
+    """Protein-design approval was removed. Existing waiting tasks stay waiting."""
+    del conn, task_id
+    return False
 
 
 async def fail(

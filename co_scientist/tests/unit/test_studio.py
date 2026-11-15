@@ -17,7 +17,7 @@ async def test_workspace_reads_results_without_exposing_config(tmp_cfg, conn):
     report.write_text('# Report\n\nA test result.\n\n<script>alert(1)</script>\n', encoding="utf-8")
     await sessions.insert(conn, Session(
         id="test-session", created_at=now, updated_at=now, status="done",
-        research_goal="Test nanopore question", research_plan=ResearchPlan(objective="Test"),
+        research_goal="Test a research question", research_plan=ResearchPlan(objective="Test"),
         config_snapshot={"api_key": "secret-must-stay-on-server"},
         budget_tokens=1000, budget_usd=1, final_overview="artifacts/report.md",
     ))

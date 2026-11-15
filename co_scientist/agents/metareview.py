@@ -23,6 +23,7 @@ from ..logging import get_logger
 from ..models import SystemFeedback, Task, TaskResult
 from ..models.hypothesis import CitedPaper
 from ..models.review import Evidence
+from ..orchestrator.contacts import suggest_contacts
 from ..safety.evidence import NOVELTY_POLICY, audit_summary
 from ..storage.artifacts import write_json, write_text
 from ..storage.repos import feedback as fb_repo
@@ -180,18 +181,8 @@ class MetaReviewAgent(BaseAgent):
         return hyps_out, reviews_out
 
     @staticmethod
-    def _source_block(hypotheses: list, reviews: list, *, limit: int = 40) -> str:
-        """The literature the session actually saw, deduped by URL.
-
-        Meta-review runs without tools, so unless we hand it the sources
-        gathered downstream it has nothing to cite — and correctly refuses to
-        invent any, producing an overview with no references at all. Both
-        `Hypothesis.citations` and `Review.evidence` carry verified URLs
-        (verified in the sense that Generation/Reflection could only record a
-        URL that appeared in one of their own tool results).
-        """
+    def _seen_sources(hypotheses: list, reviews: list) -> dict[str, dict[str, Any]]:
         seen: dict[str, dict[str, Any]] = {}
-
         for h in hypotheses:
             for c in getattr(h, "citations", []) or []:
                 url = getattr(c, "url", "")
@@ -203,7 +194,6 @@ class MetaReviewAgent(BaseAgent):
                     }
                 if url:
                     seen[url]["refs"].append(h.id)
-
         for r in reviews:
             for ev in getattr(r, "evidence", []) or []:
                 url = getattr(ev, "url", "")
@@ -216,7 +206,40 @@ class MetaReviewAgent(BaseAgent):
                         "refs": [],
                     }
                 seen[url]["refs"].append(r.hypothesis_id)
+        return seen
 
+    @staticmethod
+    def _source_records(hypotheses: list, reviews: list, *, limit: int = 40) -> list[dict[str, Any]]:
+        return [
+            {"url": url, **meta}
+            for url, meta in list(MetaReviewAgent._seen_sources(hypotheses, reviews).items())[:limit]
+        ]
+
+    @staticmethod
+    def _collect_reading_levels(levels: dict[str, str], record: dict) -> None:
+        rank = {"full_text": 4, "fetched_text": 3, "abstract": 2, "search_snippet": 1}
+        for card in record.get("evidence_audit") or []:
+            if not isinstance(card, dict):
+                continue
+            url = card.get("url")
+            level = card.get("retrieval_level")
+            if not url or not level:
+                continue
+            if rank.get(level, 0) >= rank.get(levels.get(url, ""), 0):
+                levels[url] = level
+
+    @staticmethod
+    def _source_block(hypotheses: list, reviews: list, *, limit: int = 40, reading_levels: dict[str, str] | None = None) -> str:
+        """The literature the session actually saw, deduped by URL.
+
+        Meta-review runs without tools, so unless we hand it the sources
+        gathered downstream it has nothing to cite — and correctly refuses to
+        invent any, producing an overview with no references at all. Both
+        `Hypothesis.citations` and `Review.evidence` carry verified URLs
+        (verified in the sense that Generation/Reflection could only record a
+        URL that appeared in one of their own tool results).
+        """
+        seen = MetaReviewAgent._seen_sources(hypotheses, reviews)
         if not seen:
             return ""
 
@@ -228,6 +251,13 @@ class MetaReviewAgent(BaseAgent):
                 line += f'\n  > "{meta["excerpt"][:300]}"'
             if refs:
                 line += f"\n  (cited by hypotheses: {refs}; relation not independently verified)"
+            depth = (reading_levels or {}).get(url)
+            if depth == "full_text":
+                line += "\n  Reading: open full text, including methods, results, or discussion windows."
+            elif depth == "fetched_text":
+                line += "\n  Reading: fetched page text. Section coverage was not identified."
+            elif depth in {"abstract", "search_snippet"}:
+                line += "\n  Reading stopped at the abstract or a search snippet. Do not describe methods or results from this source."
             lines.append(line)
         if len(seen) > limit:
             lines.append(f"- …and {len(seen) - limit} more sources not shown.")
@@ -257,11 +287,15 @@ class MetaReviewAgent(BaseAgent):
 
         # Build the top-hypotheses block: summary + best review + winning rationale
         chunks: list[str] = []
+        reading_levels: dict[str, str] = {}
         for h in top:
-            h_audit = audit_summary(await self._read_record(h.artifact_path))
+            record = await self._read_record(h.artifact_path)
+            self._collect_reading_levels(reading_levels, record)
+            h_audit = audit_summary(record)
             review_lines: list[str] = []
             for r in reviews_by_hyp.get(h.id, []):
                 review_record = await self._read_record(r.artifact_path)
+                self._collect_reading_levels(reading_levels, review_record)
                 review_lines.append(audit_summary(review_record))
                 if review_record.get("notes"):
                     review_lines.append("Review limitations: " + str(review_record["notes"])[:1200])
@@ -282,7 +316,8 @@ class MetaReviewAgent(BaseAgent):
 
         all_reviews = [rv for group in reviews_by_hyp.values() for rv in group]
         hydrated_hyps, hydrated_reviews = await self._hydrate_sources(top, all_reviews)
-        sources = self._source_block(hydrated_hyps, hydrated_reviews)
+        records = self._source_records(hydrated_hyps, hydrated_reviews)
+        sources = self._source_block(hydrated_hyps, hydrated_reviews, reading_levels=reading_levels)
 
         prompt = render(
             "metareview.final",
@@ -319,6 +354,7 @@ class MetaReviewAgent(BaseAgent):
 
         from ..obs import diversity
         diagnostics = await diversity.record(self.deps.cfg, self.deps.db, session.id)
+        text += "\n\n" + suggest_contacts(records) + "\n"
         text += "\n\n" + diversity.render(diagnostics) + "\n"
         overview_path = await write_text(
             self.deps.cfg, session.id, "final", "overview", ".md", text

@@ -83,14 +83,14 @@ async def test_confirm_edited_brief_is_atomic_idempotent_and_shared_launch(clien
     assert saved.status_code == 200
     d = saved.json()
     assert not application.state.launched
-    body = {"brief": d["brief"], "version": d["version"], "confirmed": True, "options": {"n_initial": 2,"target_molecule":"RNA"}}
+    body = {"brief": d["brief"], "version": d["version"], "confirmed": True, "options": {"n_initial": 2}}
     responses = await asyncio.gather(*(client.post(f"/api/scoping/{d['id']}/confirm", json=body) for _ in range(4)))
     assert all(r.status_code == 200 for r in responses)
     assert len({r.json()["session_id"] for r in responses}) == 1
     assert len(application.state.launched) == 1
     session = await sessions.fetch(conn, responses[0].json()["session_id"])
     assert session.research_goal == d["brief"]["core_question"]
-    assert session.research_plan.target_molecule == "RNA"
+    assert session.research_plan.target_molecule == "unknown"
     assert "只使用已有公开数据" in str(session.research_plan.constraints)
     assert "用户修改的研究主题" in session.research_plan.preferences[0]
     assert "AI 建议" in session.research_plan.preferences[0]

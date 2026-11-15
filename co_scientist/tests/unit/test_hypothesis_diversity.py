@@ -145,11 +145,23 @@ async def test_four_real_strategy_paths_each_register_one(tmp_cfg, conn, strateg
     assert len(result.hypothesis_ids) == 1
     pool = await hypotheses.list_for_session(conn, "diversity")
     assert len(pool) == 1 and pool[0].strategy == strategy
-    assert llm.specs[0][1].mode == strategy
-    prompt = llm.specs[0][0].user_blocks[0].text
+    final_spec, final_ctx = llm.specs[-1]
+    assert final_ctx.mode == strategy
+    prompt = final_spec.user_blocks[0].text
     assert "Batch diversity" in prompt and "Renaming terms" in prompt
     assert "Propose three" not in prompt
     assert result.extra["requested_strategy"] == result.extra["effective_strategy"] == strategy
+    if strategy == "debate":
+        assert len(llm.specs) == tmp_cfg.generation.debate_turns
+        assert result.extra["simulated_turns"] == tmp_cfg.generation.debate_turns - 1
+        assert "Proposer" in llm.specs[0][0].user_blocks[0].text
+        assert "Completed simulated turns" in prompt
+    elif strategy == "assumption":
+        assert len(llm.specs) == tmp_cfg.generation.assumption_hops
+        assert "Completed simulated turns" in prompt
+    else:
+        assert len(llm.specs) == 1
+        assert result.extra["simulated_turns"] == 0
 
 
 @pytest.mark.asyncio
@@ -334,11 +346,11 @@ async def test_proximity_labels_are_consumed_by_ranking_without_deleting_rows(tm
     assert pool[0].dedup_cluster == pool[1].dedup_cluster != pool[2].dedup_cluster
     assert result.extra["behavior"] == "labels_only_no_deletion"
     ranker = RankingAgent(deps(tmp_cfg, conn))
-    # h1 has closer Elo; h2 offers a different cluster instead.
-    assert ranker._nearest_elo(pool[0], pool[1:]).id == pool[2].id
+    # h1 shares a cluster with the target; h2 is a different direction.
+    assert ranker._nearest_elo(pool[0], pool[1:]).id == pool[1].id
     tmp_cfg.run.research_mode = "lightweight"
     a,b,_ = await ranker._select_pair("diversity", pool, focus_id=None)
-    assert a.dedup_cluster != b.dedup_cluster
+    assert a.dedup_cluster == b.dedup_cluster
 
 
 @pytest.mark.asyncio

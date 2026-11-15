@@ -9,12 +9,12 @@ from __future__ import annotations
 from typing import Any
 
 from ..config import Config
-from .alphaprotein_novo import AlphaProteinNovoTool
 from .base import Tool, ToolCtx, ToolResult, to_anthropic_tool
 from .builtins.arxiv import ArxivSearchTool
 from .builtins.europe_pmc import EuropePMCSearchTool
 from .builtins.pubmed import PubmedSearchTool
 from .science_skills import ScienceSkillTool, discover_skills
+from .read_paper import ReadPaperTool
 from .web_fetch import WebFetchTool
 from .web_search import WebSearchTool
 
@@ -22,23 +22,21 @@ from .web_search import WebSearchTool
 # matched explicitly in the resolver).
 AGENT_TOOLS: dict[str, set[str]] = {
     "generation": {
-        "web_search", "web_fetch",
+        "web_search", "web_fetch", "read_paper",
         "pubmed_search", "arxiv_search", "europe_pmc_search",
         "literature_*",   # any science-skills literature_* tools
     },
     "reflection": {
-        "web_search", "web_fetch",
+        "web_search", "web_fetch", "read_paper",
         "pubmed_search", "arxiv_search", "europe_pmc_search",
         "literature_*",
-        "alphaprotein_novo",
         # code_exec wired in M2
     },
     "ranking": set(),                # no tools mid-debate
     "evolution": {
-        "web_search", "web_fetch",
+        "web_search", "web_fetch", "read_paper",
         "pubmed_search", "arxiv_search", "europe_pmc_search",
         "literature_*",
-        "alphaprotein_novo",
     },
     "proximity": set(),
     "metareview": set(),
@@ -54,10 +52,10 @@ class ToolRegistry:
         # Built-ins
         for t in (
             WebFetchTool(self._cfg),
+            ReadPaperTool(self._cfg),
             PubmedSearchTool(self._cfg),
             ArxivSearchTool(),
             EuropePMCSearchTool(),
-            AlphaProteinNovoTool(self._cfg),
         ):
             self._register(t)
         # web_search only registers if a backing search API key is set.

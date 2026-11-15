@@ -34,4 +34,7 @@ What did the system not explore? Where was the literature thin? Where would a do
 
 Use markdown formatting. Cite hypothesis IDs as `[H-...]` inline.
 
-Citations: cite sources by their `[S...]` tag inline, and close with a `# Sources` section listing each tag you used with its full URL. **Use only URLs from the source list above — never invent one, and never cite a URL that is not listed.** If the list is empty, say so plainly and mark literature claims as requiring the scientist's verification.
+Citations: cite sources by their `[S...]` tag inline, and close with a `# Sources` section listing each tag you used with its full URL. **Use only URLs from the source list above — never invent one, and never cite a URL that is not listed.** If a source line says the reading stopped at the abstract or a snippet, do not describe that paper's methods or results. If the list is empty, say so plainly and mark literature claims as requiring the scientist's verification.
+
+# Research contacts
+Do not name a person, email, or institution unless that exact name appears in a source excerpt above. If no excerpt contains one, say that no contact can be suggested. A separate section is appended from those excerpts; do not invent collaborators.

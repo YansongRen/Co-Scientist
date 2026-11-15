@@ -23,7 +23,7 @@
   function applyLaunchDefaults(){
     let saved={};try{saved=JSON.parse(localStorage.getItem('co-scientist-launch-limits')||'{}');}catch(_){/* Optional preferences. */}
     saved={...saved,...(state.launchOptions||{})};
-    const values={budget_usd:defaults.budget,budget_tokens:defaults.budget_tokens||500000,wall_clock_seconds:defaults.wall_clock,n_initial:2,concurrency:1,research_mode:'lightweight',target_molecule:'unspecified',...saved};
+    const values={budget_usd:defaults.budget,budget_tokens:defaults.budget_tokens||500000,wall_clock_seconds:defaults.wall_clock,n_initial:2,concurrency:1,research_mode:'lightweight',...saved};
     Object.entries(values).forEach(([key,value])=>{if($('#launch-form').elements[key])$('#launch-form').elements[key].value=value;});
   }
   function rememberLaunch(){
@@ -53,21 +53,13 @@
     return Number.isNaN(d.getTime()) ? '—' : d.toLocaleTimeString('zh-CN', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
   };
   function title(goal = '') {
-    if (/homopolymer.*nanopore|nanopore.*homopolymer/i.test(goal)) return '纳米孔测序中的同聚物误差';
     return goal.length > 38 ? `${goal.slice(0, 38)}…` : goal || '未命名研究';
   }
   function goalText(goal) {
-    if (/^Investigate two distinct, mechanistically specific hypotheses explaining homopolymer/.test(goal)) {
-      return '探索纳米孔 DNA 测序中，同聚物长度估计误差的两种具体机制。结合已发表文献，寻找支持与反对证据，并设计基于公开测序数据的验证方案。';
-    }
     return goal;
   }
   function hypothesisTitle(h) {
-    const translations = {
-      hyp_a3ebcba5e95e53ae: '马达驱动的停留时间压缩，导致同聚物长度被系统性低估',
-      hyp_846e74db76618809: '解旋酶制动处的停留时间量化失效，导致同聚物长度误判',
-    };
-    return translations[h.id] || h.title;
+    return h.title;
   }
   const verdict = v => ({missing_piece:'仍需补充证据',supported:'证据支持',promising:'值得探索',reject:'建议重新评估',needs_revision:'需要修订',revise:'需要修订',accept:'通过审查'}[v] || v || '等待审查');
   function toast(message) {
@@ -279,10 +271,11 @@
     quote_too_short:'引文过短，无法可靠核对', no_excerpt:'未提供原文片段', not_checked:'未核验原文'};
   const relationLabels = {supports:'支持',contradicts:'反对',context:'背景资料',uncertain:'尚未确定'};
   const levelLabels = {direct:'直接证据',indirect:'间接证据',background:'背景信息',unknown:'未标注强度'};
+  const readingLabels = {full_text:'已读开放全文', fetched_text:'已读抓取正文', abstract:'只读到摘要', search_snippet:'只有搜索片段'};
   function evidenceView(d) {
     const summary = d.evidence?.summary || {total:0,quotes_matched:0,scope_warnings:0};
     const policy = d.policy || {};
-    return `<h1 class="view-heading evidence-title">证据</h1><div class="evidence-metrics"><div><strong>${summary.total}</strong><span>证据条目</span></div><div><strong>${summary.quotes_matched}</strong><span>原文片段匹配</span></div><div><strong>${summary.scope_warnings}</strong><span>适用范围提示</span></div><div><strong>${d.hypotheses.length}</strong><span>新颖性待核验</span></div></div><div class="evidence-policy"><span>${icon('flask')}研究对象：${esc(d.evidence?.target_molecule === 'unknown' ? '未限定' : d.evidence?.target_molecule || '未限定')}</span><span>${policy.mode === 'lightweight' ? `轻量研究 · 每对假设最多比较 ${policy.pair_cap} 次 · 最多 ${policy.max_ideas} 条假设` : '历史 / 标准研究策略'}</span></div><div class="evidence-toolbar"><div class="evidence-filters">${[['all','全部证据'],['scope','范围提示'],['unverified','原文待核验'],['matched','原文已匹配']].map(([key,label]) => `<button data-evidence-filter="${key}" aria-pressed="${state.evidenceFilter===key}">${label}</button>`).join('')}</div><select id="evidence-hypothesis" aria-label="按假设筛选证据"><option value="all">全部假设</option>${d.hypotheses.map((h,i)=>`<option value="${esc(h.id)}" ${state.evidenceHyp===h.id?'selected':''}>H${String(i+1).padStart(2,'0')} · ${esc(hypothesisTitle(h))}</option>`).join('')}</select></div><div id="evidence-card-list">${evidenceCards(d)}</div><section class="novelty-section"><h2>检索记录与新颖性边界</h2>${(d.evidence?.novelty || []).map((n,i) => `<details class="novelty-search"><summary>H${String(i+1).padStart(2,'0')} · 新颖性尚未核验 <span>${n.searches.length} 条已保存检索</span></summary>${n.searches.length ? n.searches.map(q=>`<div class="search-audit-row"><span>${esc(q.tool)}</span><strong>${esc(q.query || '未记录检索式')}</strong><small>${q.status === 'failed' ? '请求失败' : q.status === 'empty' ? '检索成功 · 无结果' : '检索完成'}${q.result_count!=null ? ` · ${q.result_count} 条结果` : ''}</small></div>`).join('') : '<p>暂无检索记录</p>'}</details>`).join('')}</section>`;
+    return `<h1 class="view-heading evidence-title">证据</h1><div class="evidence-metrics"><div><strong>${summary.total}</strong><span>证据条目</span></div><div><strong>${summary.quotes_matched}</strong><span>原文片段匹配</span></div><div><strong>${summary.scope_warnings}</strong><span>适用范围提示</span></div><div><strong>${d.hypotheses.length}</strong><span>新颖性待核验</span></div></div><div class="evidence-policy"><span>${policy.mode === 'lightweight' ? `轻量研究 · 每对假设最多比较 ${policy.pair_cap} 次 · 最多 ${policy.max_ideas} 条假设` : '历史 / 标准研究策略'}</span></div><div class="evidence-toolbar"><div class="evidence-filters">${[['all','全部证据'],['scope','范围提示'],['unverified','原文待核验'],['matched','原文已匹配']].map(([key,label]) => `<button data-evidence-filter="${key}" aria-pressed="${state.evidenceFilter===key}">${label}</button>`).join('')}</div><select id="evidence-hypothesis" aria-label="按假设筛选证据"><option value="all">全部假设</option>${d.hypotheses.map((h,i)=>`<option value="${esc(h.id)}" ${state.evidenceHyp===h.id?'selected':''}>H${String(i+1).padStart(2,'0')} · ${esc(hypothesisTitle(h))}</option>`).join('')}</select></div><div id="evidence-card-list">${evidenceCards(d)}</div><section class="novelty-section"><h2>检索记录与新颖性边界</h2>${(d.evidence?.novelty || []).map((n,i) => `<details class="novelty-search"><summary>H${String(i+1).padStart(2,'0')} · 新颖性尚未核验 <span>${n.searches.length} 条已保存检索</span></summary>${n.searches.length ? n.searches.map(q=>`<div class="search-audit-row"><span>${esc(q.tool)}</span><strong>${esc(q.query || '未记录检索式')}</strong><small>${q.status === 'failed' ? '请求失败' : q.status === 'empty' ? '检索成功 · 无结果' : '检索完成'}${q.result_count!=null ? ` · ${q.result_count} 条结果` : ''}</small></div>`).join('') : '<p>暂无检索记录</p>'}</details>`).join('')}</section>`;
   }
   function evidenceCards(d) {
     const cards = (d.evidence?.cards || []).filter(c => (state.evidenceHyp==='all' || c.hypothesis_id===state.evidenceHyp) && (state.evidenceFilter==='all' || state.evidenceFilter==='scope' && c.scope_warning || state.evidenceFilter==='unverified' && c.quote_status!=='quote_found' || state.evidenceFilter==='matched' && c.quote_status==='quote_found'));
@@ -290,7 +283,7 @@
       const i = d.hypotheses.findIndex(h=>h.id===c.hypothesis_id);
       const hypothesis = d.hypotheses[i];
       const displayClaim = c.origin !== 'reflection' && hypothesis && c.claim === hypothesis.summary ? `关联假设：${hypothesisTitle(hypothesis)}` : c.claim || c.title;
-      return `<article class="evidence-card" data-evidence-card="${esc(c.id)}"><div class="evidence-card-top"><span class="hyp-number">${esc(c.reference)}</span><span>H${String(i+1).padStart(2,'0')} · ${esc(agents[c.origin]?.[0] || c.origin)}</span><span class="evidence-quote-state ${c.quote_status==='quote_found'?'matched':''}">${icon(c.quote_status==='quote_found'?'check':'clock')}${quoteLabels[c.quote_status] || '未核验原文'}</span></div><h2 title="${esc(c.claim || c.title)}">${esc(displayClaim)}</h2>${(c.claim || c.title).length > 240 ? `<details class="claim-detail"><summary>展开完整论断</summary><p>${esc(c.claim || c.title)}</p></details>` : ''}<a class="evidence-source" href="${esc(c.url)}" target="_blank" rel="noopener noreferrer">${icon('link')}${esc(c.title)} ↗</a><div class="evidence-judgment"><span>Agent 标注：${relationLabels[c.relation] || '尚未确定'}</span><span>${levelLabels[c.support_level] || '未标注强度'}</span><span>来源涉及 ${esc(({unknown:'未识别对象',mixed:'DNA / RNA'})[c.source_molecule] || c.source_molecule)}</span></div>${c.scope_warning ? `<div class="scope-warning">${icon('activity')}<span>${esc(c.scope_warning)}</span></div>` : ''}${c.scope ? `<p class="source-scope">Agent 标注的研究条件：${esc(c.scope)}</p>` : ''}<details class="quote-detail"><summary>${c.excerpt ? '查看引用的原文片段' : '尚无原文片段'}${c.legacy ? '<span>历史记录 · 未重新核验</span>' : `<span>${{fetched_text:'网页提取内容',abstract:'数据库摘要',search_snippet:'搜索摘要',unknown:'未保存可核验内容'}[c.retrieval_level] || ''}</span>`}</summary>${c.excerpt ? `<blockquote>${esc(c.excerpt)}</blockquote>` : '<p>当前条目仅有链接，无法核对原文与论断之间的关系。</p>'}</details><div class="evidence-card-bottom"><span>论断是否被支持：待人工核验</span><button data-hypothesis="${esc(c.hypothesis_id)}">查看假设 ${icon('chevron')}</button></div></article>`;
+      return `<article class="evidence-card" data-evidence-card="${esc(c.id)}"><div class="evidence-card-top"><span class="hyp-number">${esc(c.reference)}</span><span>H${String(i+1).padStart(2,'0')} · ${esc(agents[c.origin]?.[0] || c.origin)}</span><span class="evidence-quote-state ${c.quote_status==='quote_found'?'matched':''}">${icon(c.quote_status==='quote_found'?'check':'clock')}${quoteLabels[c.quote_status] || '未核验原文'}</span></div><h2 title="${esc(c.claim || c.title)}">${esc(displayClaim)}</h2>${(c.claim || c.title).length > 240 ? `<details class="claim-detail"><summary>展开完整论断</summary><p>${esc(c.claim || c.title)}</p></details>` : ''}<a class="evidence-source" href="${esc(c.url)}" target="_blank" rel="noopener noreferrer">${icon('link')}${esc(c.title)} ↗</a><div class="evidence-judgment"><span>Agent 标注：${relationLabels[c.relation] || '尚未确定'}</span><span>${levelLabels[c.support_level] || '未标注强度'}</span>${readingLabels[c.retrieval_level] ? `<span>${readingLabels[c.retrieval_level]}</span>` : ''}</div>${c.scope_warning ? `<div class="scope-warning">${icon('activity')}<span>${esc(c.scope_warning)}</span></div>` : ''}${c.scope ? `<p class="source-scope">Agent 标注的研究条件：${esc(c.scope)}</p>` : ''}<details class="quote-detail"><summary>${c.excerpt ? '查看引用的原文片段' : '尚无原文片段'}${c.legacy ? '<span>历史记录 · 未重新核验</span>' : `<span>${{fetched_text:'网页提取内容',abstract:'数据库摘要',search_snippet:'搜索摘要',unknown:'未保存可核验内容'}[c.retrieval_level] || ''}</span>`}</summary>${c.excerpt ? `<blockquote>${esc(c.excerpt)}</blockquote>` : '<p>当前条目仅有链接，无法核对原文与论断之间的关系。</p>'}</details><div class="evidence-card-bottom"><span>论断是否被支持：待人工核验</span><button data-hypothesis="${esc(c.hypothesis_id)}">查看假设 ${icon('chevron')}</button></div></article>`;
     }).join('') || '<div class="empty-state">当前筛选下没有证据条目。没有已匹配原文，表示仍需核验。</div>';
   }
   function renderEvidenceCards() {
@@ -304,12 +297,36 @@
     const initial = $('#launch-form').elements.n_initial;
     initial.value = Math.min(Number(initial.max), Math.max(Number(initial.min), Number(initial.value || 2)));
   }
+  document.addEventListener('submit', async event => {
+    if (event.target?.id !== 'propose-form') return;
+    event.preventDefault();
+    const status = $('#propose-status');
+    const text = event.target.elements.statement.value.trim();
+    status.textContent = '正在加入审查队列…';
+    try {
+      const body = new FormData();
+      body.set('text', text);
+      const response = await fetch(`/api/sessions/${state.id}/hypotheses`, {method:'POST', body});
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.detail || '没有加入');
+      event.target.reset();
+      toast(payload.created ? '已进入审查队列' : '这条假设已经在队列中');
+      await selectSession(state.id);
+    } catch (error) {
+      status.textContent = error.message || '没有加入';
+    }
+  });
   document.addEventListener('change', event => {
     if (event.target.id==='evidence-hypothesis') {state.evidenceHyp=event.target.value; renderEvidenceCards();}
     if (event.target.id==='research-mode') launchPolicy();
   });
+  function primaryReview(h) {
+    const reviews = h.reviews || [];
+    return reviews.find(r => r.kind === 'full') || reviews.find(r => r.kind !== 'simulation') || reviews[0];
+  }
   function card(h, index) {
-    return `<button class="hypothesis-card" data-hypothesis="${esc(h.id)}"><div class="hyp-card-top"><span class="hyp-number">H${String(index+1).padStart(2,'0')}</span><span class="hyp-tag">${h.reviews.length ? '已审查' : '候选假设'}</span><span class="hyp-elo">${Math.round(h.elo || 0)} <span>Elo</span></span></div><h3>${esc(hypothesisTitle(h))}</h3><p>${esc(h.summary || h.title)}</p><div class="hyp-card-bottom"><span>${icon('check')}${esc(verdict(h.reviews[0]?.verdict))}</span><span>${fmt(h.matches)} 场比较 ${icon('chevron')}</span></div></button>`;
+    const review = primaryReview(h);
+    return `<button class="hypothesis-card" data-hypothesis="${esc(h.id)}"><div class="hyp-card-top"><span class="hyp-number">H${String(index+1).padStart(2,'00')}</span><span class="hyp-tag">${h.reviews.length ? '已审查' : '候选假设'}</span><span class="hyp-elo">${Math.round(h.elo || 0)} <span>Elo</span></span></div><h3>${esc(hypothesisTitle(h))}</h3><p>${esc(h.summary || h.title)}</p><div class="hyp-card-bottom"><span>${icon('check')}${esc(verdict(review?.verdict))}</span><span>${fmt(h.matches)} 场比较 ${icon('chevron')}</span></div></button>`;
   }
   function researchView(d) {
     const completed = d.session.status === 'done';
@@ -319,7 +336,7 @@
     return `<div class="user-label">研究问题 · ${date(d.session.created_at)} ${icon('clock')}</div><div class="user-question">${esc(goalText(d.session.research_goal))}${goalText(d.session.research_goal) !== d.session.research_goal ? '<br><button class="question-expand" data-action="original">查看原始问题 ↗</button>' : ''}</div><article class="assistant-message"><div class="assistant-heading"><span class="assistant-mark">${icon('flask')}</span><strong>Co-Scientist</strong><span class="completion-badge">${icon(completed ? 'check' : 'activity')}${statusText(d.session.status)}</span></div><div class="assistant-body"><div class="agent-pipeline" aria-label="Agent 执行状态">${d.stages.map((s, i) => `${i ? `<span class="pipeline-arrow">${icon('chevron')}</span>` : ''}<span class="pipeline-step ${esc(s.status)}" title="${agents[s.agent][0]} · ${statusText(s.status)}">${icon(s.status === 'done' ? 'check' : s.status === 'unused' ? 'minus' : 'activity')}${agents[s.agent][3]}</span>`).join('')}</div><h1 class="result-heading">${count ? `${count === 2 ? '两' : count}条可验证的研究假设` : '研究正在展开'}</h1><div class="result-summary">${esc(summary)}</div><div class="hypothesis-cards">${d.hypotheses.map(card).join('') || '<div class="empty-state">正在等待第一条假设…</div>'}</div><button class="evidence-entry" data-view="evidence">${icon('book')}<span>检查证据与适用范围<small>${d.evidence?.summary.total || 0} 条证据 · ${d.evidence?.summary.scope_warnings || 0} 条范围提示 · 新颖性待核验</small></span>${icon('chevron')}</button>${d.report.markdown ? `<button class="report-link" data-action="report">${icon('file')} 阅读完整研究报告 ${icon('chevron')}</button><div class="message-actions"><button class="icon-button" data-action="copy" aria-label="复制研究报告" title="复制报告">${icon('copy')}</button><button class="icon-button" data-action="download" aria-label="下载 Markdown 报告" title="下载 Markdown">${icon('download')}</button><span>${d.sources.length} 篇参考资料</span></div>` : ''}</div></article>`;
   }
   function hypothesesView(d) {
-    return `<h1 class="view-heading">研究假设</h1><div class="hypothesis-cards">${d.hypotheses.map(card).join('') || '<div class="empty-state">还没有假设，等待 Generation Agent 开始工作。</div>'}</div>`;
+    return `<h1 class="view-heading">研究假设</h1><form id="propose-form" class="propose-form"><label>提交自己的假设<textarea name="statement" maxlength="4000" required placeholder="写一条可检验的假设。它会先经过初审和文献审查，通过后才参加 Elo 比较。"></textarea></label><button class="secondary-button" type="submit">加入审查队列</button><p id="propose-status"></p></form><div class="hypothesis-cards">${d.hypotheses.map(card).join('') || '<div class="empty-state">还没有假设，等待 Generation Agent 开始工作。</div>'}</div>`;
   }
   function activityView(d) {
     return `<h1 class="view-heading">运行记录</h1><div class="activity-group-label">模型调用</div>${d.calls.map(c => `<div class="call-row"><span class="call-avatar">${icon(agents[c.agent]?.[2] || 'activity')}</span><div class="call-info"><strong>${esc(agents[c.agent]?.[0] || c.agent)} <span class="hyp-tag">${esc(c.action)}</span></strong><p>${esc(c.model)} · ${time(c.started_at)}</p></div><div class="call-meta">${fmt(Number(c.input_tokens || 0) + Number(c.output_tokens || 0))} tokens<br>${money(c.cost_usd)}</div></div>`).join('') || '<div class="empty-state">暂无模型调用记录。</div>'}<div class="activity-group-label">假设比较</div>${d.matches.slice(0,8).map(m => `<div class="event-row"><time>${time(m.created_at)}</time><details><summary>${m.winner === 'tie' ? '平局' : '已完成假设比较'} · ${esc(m.mode)}</summary><pre>${esc(m.rationale)}\n\n${esc(m.hyp_a)}: ${m.elo_a_after}\n${esc(m.hyp_b)}: ${m.elo_b_after}</pre></details></div>`).join('') || ''}<div class="activity-group-label">运行事件</div>${d.events.map(e => `<div class="event-row"><time>${time(e.ts)}</time><details><summary>${esc(e.agent || 'Supervisor')} · ${esc(e.event)}</summary><pre>${esc(JSON.stringify(e.payload, null, 2))}</pre></details></div>`).join('')}`;

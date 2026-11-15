@@ -1,6 +1,7 @@
 """Generation agent — proposes new hypotheses.
 
-Four explicit bounded prompt strategies; each task registers one hypothesis.
+Four explicit prompt strategies. Debate and assumption run a bounded series of
+text turns, then register one hypothesis. Literature and feedback stay one call.
 """
 
 from __future__ import annotations
@@ -10,14 +11,13 @@ from typing import Any
 
 from .. import ids
 from ..llm.prompts import render
-from ..llm.routing import route
+from ..llm.routing import generation_author, route
 from ..llm.tool_loop import ToolLoopExhausted, run_tool_loop
 from ..llm.types import AgentCallSpec, CachedBlock, CallContext
 from ..logging import get_logger
 from ..models import CitedPaper, ResearchPlan, Task, TaskResult
-from ..safety.evidence import NOVELTY_POLICY, annotate_record, audit_summary, infer_molecule
+from ..safety.evidence import NOVELTY_POLICY, annotate_record, audit_summary
 from ..safety.quoting import quote_untrusted
-from ..science.alphaprotein_novo import AlphaProteinNovoAdapter
 from ..storage.artifacts import read_json
 from ..storage.repos import feedback as fb_repo
 from ..storage.repos import hypotheses as hyp_repo
@@ -25,6 +25,7 @@ from ..storage.repos import sessions as sess_repo
 from ..vectors import admission
 from ..vectors.embedder import make_embedder
 from .base import AgentDeps, BaseAgent
+from .dialogue import text_turns
 from .generation_strategies import DIVERSITY, STRATEGIES, pool_context, resolve_strategy
 from .schemas import RECORD_HYPOTHESIS_TOOL
 
@@ -54,9 +55,11 @@ class GenerationAgent(BaseAgent):
         # 1. Render the prompt and run the tool loop with `record_hypothesis` available.
         articles_block = (
             "You will gather literature using the available tools (web_search, "
-            "pubmed_search, arxiv_search, europe_pmc_search, web_fetch). Pull "
-            "abstracts for the most relevant items, then synthesize. After you "
-            "have surveyed the literature, call `record_hypothesis` exactly once "
+            "pubmed_search, arxiv_search, europe_pmc_search, web_fetch, read_paper). "
+            "Search results are titles and abstracts. Before citing a paper, call read_paper "
+            "and use the methods, results, and discussion it returns. If reading_depth is not "
+            "full_text, do not describe methods or results you did not receive. "
+            "After you have read the papers you will cite, call `record_hypothesis` exactly once "
             "with your proposed hypothesis.\n\n"
             + NOVELTY_POLICY
         )
@@ -89,9 +92,19 @@ class GenerationAgent(BaseAgent):
                 cache=True,
             ),
         ]
+        turns = await self._simulated_turns(task, plan, strategy, sys_blocks)
+        if turns:
+            prompt += "\n\n# Completed simulated turns\n" + "\n\n".join(
+                f"## Turn {number}\n{quote_untrusted(text, id_=f'{strategy}-turn-{number}')}"
+                for number, text in enumerate(turns, start=1)
+            )
+            prompt += "\nRegister exactly one hypothesis that accounts for these turns."
         user_blocks = [CachedBlock(prompt, cache=False)]
 
-        r = route(self.deps.cfg, "generation", strategy)
+        author = generation_author(
+            self.deps.cfg, task_id=task.id, batch_index=task.payload.get("batch_index"),
+        )
+        r = route(self.deps.cfg, "generation", strategy, endpoint=author)
         tools = [*self.deps.tools.anthropic_tools_for("generation"), RECORD_HYPOTHESIS_TOOL]
 
         spec = AgentCallSpec(
@@ -137,7 +150,7 @@ class GenerationAgent(BaseAgent):
         # 3. Validate every citation URL is in the union of URLs seen during the loop.
         record["citations"] = _filter_to_seen_urls(record.get("citations", []), loop_result.seen_urls)
 
-        annotate_record(record, loop_result, molecule=plan.target_molecule if plan.target_molecule != "unknown" else infer_molecule(session.research_goal))
+        annotate_record(record, loop_result)
         record["parent_ids"] = []  # Generation has no inherited hypotheses.
 
         # 4. Persist + embed + dedup-check.
@@ -146,19 +159,60 @@ class GenerationAgent(BaseAgent):
         if not was_new and exact:
             existing = await hyp_repo.fetch(self.deps.db, hid)
             record = (await read_json(self.deps.cfg, existing.artifact_path))["record"]
-        request = _valid_protein_design_request(self.deps, record.get("protein_design_request")) if exact else None
-        if request is not None and exact:
-            request["hypothesis_id"] = hid
         return TaskResult(
             kind="hypothesis_created",
             hypothesis_ids=[hid] if was_new or exact else [],
             extra={"requested_strategy": requested_strategy, "effective_strategy": strategy, "fallback_reason": fallback,
-                   "tool_calls": loop_result.tool_calls, "iterations": loop_result.iterations,
-                   "protein_design_request": request,
-                   "protein_design_requests": [request] if request else []},
+                   "simulated_turns": len(turns),
+                   "tool_calls": loop_result.tool_calls, "iterations": loop_result.iterations},
         )
 
     # ---------------------------------------------------------------- #
+
+    async def _simulated_turns(self, task, plan, strategy: str, system_blocks) -> list[str]:
+        if strategy == "debate":
+            count = self.deps.cfg.generation.debate_turns - 1
+            roles = [
+                "Proposer: offer one falsifiable mechanism for the goal. Do not register a hypothesis.",
+                "Skeptic: name the load-bearing claim most likely to fail. Do not register a hypothesis.",
+                "Experimentalist: name one observation that would separate the two positions. Do not register a hypothesis.",
+            ]
+        elif strategy == "assumption":
+            count = self.deps.cfg.generation.assumption_hops - 1
+            roles = [
+                "Name one load-bearing assumption and the subassumption it depends on. Do not register a hypothesis.",
+                "If that subassumption is true, name the observation that distinguishes it from the original assumption. Do not register a hypothesis.",
+                "State whether the subassumption is fundamental to the idea. Do not register a hypothesis.",
+            ]
+        else:
+            return []
+        count = max(0, min(count, len(roles)))
+        if count == 0:
+            return []
+        prompts = [
+            f"Goal: {plan.objective}\n\nSimulated turn {index} of {count}. {roles[index - 1]}"
+            for index in range(1, count + 1)
+        ]
+        author = generation_author(
+            self.deps.cfg, task_id=task.id, batch_index=task.payload.get("batch_index"),
+        )
+        if author:
+            routes = [
+                route(self.deps.cfg, "generation", strategy, endpoint=author)
+                for _ in range(count)
+            ]
+        elif strategy == "debate":
+            routes = [
+                route(self.deps.cfg, "generation", "debate" if index != 2 else "skeptic")
+                for index in range(1, count + 1)
+            ]
+        else:
+            routes = None
+        return await text_turns(
+            self, agent_name="generation", mode=strategy, action=task.action,
+            session_id=task.session_id, task_id=task.id, prompts=prompts,
+            system_blocks=system_blocks, routes=routes,
+        )
 
     async def _persist(self, session_id: str, record: dict[str, Any], *, strategy: str) -> tuple[str | None, bool]:
         citations = [CitedPaper(title=c.get("title", ""), url=c["url"], excerpt=c.get("excerpt"),
@@ -221,22 +275,6 @@ def _build_session_context(goal: str, plan: ResearchPlan, sys_feedback_text: str
         f"- Constraints: {'; '.join(plan.constraints) or '(none)'}\n"
         f"{fb}"
     )
-
-
-def _valid_protein_design_request(deps: AgentDeps, value: Any) -> dict[str, Any] | None:
-    """Accept only an explicit, structurally complete request from the model."""
-    if not isinstance(value, dict):
-        return None
-    manifest, output_dir, mode = value.get("manifest_path"), value.get("output_dir"), value.get("mode")
-    if not all(isinstance(item, str) and item.strip() for item in (manifest, output_dir, mode)):
-        return None
-    if mode not in {"validate", "mock", "real"}:
-        return None
-    try:
-        request = AlphaProteinNovoAdapter(deps.cfg).validate_design_request(value)
-    except (OSError, ValueError, TypeError):
-        return None
-    return request.model_dump(mode="json")
 
 
 async def _latest_system_feedback(deps: AgentDeps, session_id: str) -> str | None:

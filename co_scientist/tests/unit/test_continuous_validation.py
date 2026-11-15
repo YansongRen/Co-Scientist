@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -13,7 +12,6 @@ import pytest
 from co_scientist.agents.base import AgentDeps
 from co_scientist.agents.ranking import RankingAgent
 from co_scientist.agents.reflection import ReflectionAgent
-from co_scientist.agents.scientific_tool import ScientificToolAgent
 from co_scientist.agents.supervisor import Supervisor
 from co_scientist.evals.scientific_evidence_ab import compare_case
 from co_scientist.llm.budgets import BudgetExceeded
@@ -28,11 +26,9 @@ from co_scientist.models import (
     TaskResult,
 )
 from co_scientist.orchestrator.termination import StabilityTracker, StopReason
-from co_scientist.science.alphaprotein_novo import AlphaProteinNovoAdapter, evidence_from_campaign
 from co_scientist.storage import artifacts, db
 from co_scientist.storage.repos import hypotheses, reviews, sessions, tasks
 from co_scientist.storage.repos import scientific_evidence as evidence
-from co_scientist.tools.alphaprotein_novo import AlphaProteinNovoTool
 from co_scientist.tools.base import ToolCtx
 from co_scientist.web.app import create_app
 from co_scientist.web.sanitize import sanitize_html
@@ -50,15 +46,6 @@ async def seed(conn, sid="cv-session", hid="cv-hyp"):
     return session
 
 
-def manifest(tmp_path):
-    (tmp_path / "motif.cif").write_text("data_OFFLINE_FIXTURE\n")
-    path = tmp_path / "manifest.json"
-    path.write_text(json.dumps({"defaults": {"input_file": "motif.cif", "motif_str": "A1", "motif_atoms": "A1:NE2"},
-        "designs": [{"name": "kemp", "num_designs": 1}], "folding": {"seeds": [230]},
-        "evaluation": {"suite": "kemp_eliminase"}}))
-    return path
-
-
 async def add_task(conn, sid="cv-session", hid="cv-hyp", tid="cv-task", **kwargs):
     t = Task(id=tid, session_id=sid, created_at=datetime.now(UTC), agent="scientific_tool",
              action="RunProteinDesign", target_id=hid, **kwargs)
@@ -72,25 +59,6 @@ def row(**overrides):
         "design_id": "design_1", "kind": "ap_novo_metric", "status": "real", "metric_name": "pocket_rmsd",
         "metric_value": 0.84, "source_path": "eval.json", "artifact_path": "artifact.json",
         "created_at": datetime.now(UTC), **overrides})
-
-
-def test_reinspect_mock_must_not_promote_to_real(tmp_cfg, tmp_path):
-    adapter = AlphaProteinNovoAdapter(tmp_cfg)
-    out = tmp_path / "campaign"
-    adapter.mock_campaign(str(manifest(tmp_path)), str(out))
-    assert adapter.inspect_campaign(str(out))["status"] == "mock"
-
-
-def test_missing_campaign_is_unavailable(tmp_cfg, tmp_path):
-    assert AlphaProteinNovoAdapter(tmp_cfg).inspect_campaign(str(tmp_path / "missing"))["status"] == "unavailable"
-
-
-@pytest.mark.parametrize("value", [None, float("nan"), float("inf"), "NaN", "not-a-number", True])
-def test_invalid_metric_is_not_real_evidence(value):
-    result = evidence_from_campaign({"status": "real", "evaluations": [{"path": "eval.json",
-        "payload": {"sample_name": "d", "metrics": {"bad": value}}}]},
-        session_id="s", task_id="t", hypothesis_id="h", artifact_path="a.json")
-    assert not any(r.status == "real" and r.metric_name == "bad" for r in result)
 
 
 @pytest.mark.asyncio
@@ -130,77 +98,6 @@ async def test_nonfinite_legacy_row_excluded_from_formal_ranking(tmp_cfg, conn):
     text = await RankingAgent(AgentDeps(tmp_cfg, conn, None, None))._scientific_evidence_context(["cv-hyp"])
     assert "value=nan" not in text
     assert "evidence_use=eligible" not in text
-
-
-@pytest.mark.asyncio
-async def test_request_replay_without_parent_does_not_create_next_iteration(tmp_cfg, conn, tmp_path):
-    session = await seed(conn)
-    req = {"manifest_path": str(manifest(tmp_path)), "output_dir": str(tmp_path / "out"), "mode": "mock"}
-    sup = Supervisor(tmp_cfg)
-    assert await sup._enqueue_protein_design_request(conn, session, "cv-hyp", req)
-    assert not await sup._enqueue_protein_design_request(conn, session, "cv-hyp", req)
-    async with conn.execute("SELECT COUNT(*) FROM tasks WHERE action='RunProteinDesign'") as cur:
-        assert (await cur.fetchone())[0] == 1
-
-
-@pytest.mark.asyncio
-async def test_concurrent_session_task_limit_is_atomic(tmp_cfg, conn, tmp_path):
-    session = await seed(conn)
-    now = datetime.now(UTC)
-    for n in range(1, 8):
-        await hypotheses.insert(conn, Hypothesis(id=f"h-{n}", session_id=session.id, created_at=now,
-            created_by="generation", strategy="literature", title="h", summary="h", full_text="h", artifact_path="h.json"))
-    tmp_cfg.alpha_protein_novo.max_design_tasks_per_session = 2
-    req = {"manifest_path": str(manifest(tmp_path)), "output_dir": str(tmp_path / "out"), "mode": "mock"}
-    conns = [await db.connect(tmp_cfg) for _ in range(7)]
-    try:
-        await asyncio.gather(*(Supervisor(tmp_cfg)._enqueue_protein_design_request(c, session, f"h-{n}", req)
-                               for n, c in enumerate(conns, 1)))
-    finally:
-        for c in conns:
-            await c.close()
-    async with conn.execute("SELECT COUNT(*) FROM tasks WHERE action='RunProteinDesign'") as cur:
-        assert (await cur.fetchone())[0] == 2
-
-
-@pytest.mark.asyncio
-async def test_request_target_must_belong_to_session(tmp_cfg, conn, tmp_path):
-    session = await seed(conn)
-    await seed(conn, "foreign", "foreign-hyp")
-    req = {"manifest_path": str(manifest(tmp_path)), "output_dir": str(tmp_path / "out"), "mode": "mock"}
-    assert not await Supervisor(tmp_cfg)._enqueue_protein_design_request(conn, session, "foreign-hyp", req)
-
-
-@pytest.mark.asyncio
-async def test_real_tool_cannot_self_approve(tmp_cfg, monkeypatch):
-    tmp_cfg.alpha_protein_novo.enabled = True
-    tmp_cfg.alpha_protein_novo.allow_real_runs = True
-    called = []
-    async def forbidden(*args, **kwargs):
-        called.append(True)
-        return {"status": "real"}
-    monkeypatch.setattr(AlphaProteinNovoAdapter, "run_pipeline", forbidden)
-    result = await AlphaProteinNovoTool(tmp_cfg).call(
-        {"operation": "run_pipeline", "confirm_real_run": True}, ToolCtx(tmp_cfg))
-    assert result.is_error
-    assert not called
-
-
-@pytest.mark.asyncio
-async def test_direct_real_worker_requires_durable_human_approval(tmp_cfg, conn, tmp_path, monkeypatch):
-    await seed(conn)
-    tmp_cfg.alpha_protein_novo.enabled = True
-    tmp_cfg.alpha_protein_novo.allow_real_runs = True
-    called = []
-    async def forbidden(*args, **kwargs):
-        called.append(True)
-        return {"status": "real"}
-    monkeypatch.setattr(AlphaProteinNovoAdapter, "run_pipeline", forbidden)
-    task = await add_task(conn, payload={"manifest_path": str(manifest(tmp_path)),
-        "output_dir": str(tmp_path / "out"), "mode": "real", "approved": True})
-    with pytest.raises(PermissionError):
-        await ScientificToolAgent(AgentDeps(tmp_cfg, conn, None, None)).execute(task)
-    assert not called
 
 
 def review_loop():
@@ -345,34 +242,6 @@ async def test_followup_failure_retries_cached_agent_result(tmp_cfg, conn, monke
     assert execute.await_count == 1
 
 
-@pytest.mark.asyncio
-async def test_apn_timeout_reaps_child_process(tmp_cfg, tmp_path, monkeypatch):
-    (tmp_path / "run_pipeline.py").write_text("# offline placeholder\n")
-    tmp_cfg.alpha_protein_novo.repo_path = str(tmp_path)
-    tmp_cfg.alpha_protein_novo.timeout_seconds = 0.01
-    async def communicate():
-        await asyncio.sleep(0.1)
-        return b"", b""
-    process = SimpleNamespace(returncode=None, communicate=AsyncMock(side_effect=communicate),
-                              kill=MagicMock(), terminate=MagicMock(), wait=AsyncMock(return_value=-9))
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", AsyncMock(return_value=process))
-    with pytest.raises(TimeoutError):
-        await AlphaProteinNovoAdapter(tmp_cfg).run_pipeline(str(manifest(tmp_path)), str(tmp_path / "out"), allow_real=True)
-    assert process.kill.called or process.terminate.called
-    process.wait.assert_awaited()
-
-
-@pytest.mark.parametrize("bad", [{"defaults": 7}, {"designs": 7}, {"folding": {"seeds": 3}},
-                                   {"evaluation": "oops"}, {"resequence": 2}])
-def test_malformed_manifest_reports_errors_instead_of_crashing(tmp_cfg, tmp_path, bad):
-    path = manifest(tmp_path)
-    data = json.loads(path.read_text()) | bad
-    path.write_text(json.dumps(data))
-    result = AlphaProteinNovoAdapter(tmp_cfg).validate_manifest(str(path))
-    assert not result.ok
-    assert result.errors
-
-
 def test_ab_missing_metadata_is_not_equal_budget_or_prompt_hash():
     result = compare_case({"case_id": "case", "baseline": {"reflection": {"output": "A"}},
                            "evidence": {"reflection": {"output": "B"}}})["comparisons"][0]
@@ -386,45 +255,6 @@ def test_ab_invalid_cost_cannot_be_a_valid_record(usage):
     with pytest.raises(ValueError):
         compare_case({"baseline": {"reflection": {"cost_usd": usage}},
                       "evidence": {"reflection": {"cost_usd": usage}}})
-
-
-@pytest.mark.asyncio
-async def test_approval_binds_motif_content(tmp_cfg, conn, tmp_path):
-    session = await seed(conn)
-    req = {"manifest_path": str(manifest(tmp_path)), "output_dir": str(tmp_path / "out"), "mode": "real"}
-    assert await Supervisor(tmp_cfg)._enqueue_protein_design_request(conn, session, "cv-hyp", req)
-    async with conn.execute("SELECT id FROM tasks") as cur:
-        tid = (await cur.fetchone())[0]
-    (tmp_path / "motif.cif").write_text("data_CHANGED\n")
-    with pytest.raises(ValueError, match="changed"):
-        await tasks.approve(conn, tid)
-
-
-@pytest.mark.asyncio
-async def test_dead_tasks_still_count_towards_compute_limit(tmp_cfg, conn, tmp_path):
-    session = await seed(conn)
-    tmp_cfg.alpha_protein_novo.max_design_tasks_per_session = 1
-    await add_task(conn, status="dead")
-    req = {"manifest_path": str(manifest(tmp_path)), "output_dir": str(tmp_path / "out"), "mode": "mock"}
-    assert not await Supervisor(tmp_cfg)._enqueue_protein_design_request(conn, session, "cv-hyp", req)
-
-
-@pytest.mark.asyncio
-async def test_three_round_lineage_stops_at_limit(tmp_cfg, conn, tmp_path):
-    session = await seed(conn)
-    path = manifest(tmp_path)
-    sup = Supervisor(tmp_cfg)
-    tmp_cfg.alpha_protein_novo.max_design_iterations = 2
-    req = {"manifest_path": str(path), "output_dir": str(tmp_path / "out"), "mode": "mock"}
-    assert await sup._enqueue_protein_design_request(conn, session, "cv-hyp", req)
-    for hid, parent in [("child", "cv-hyp"), ("grandchild", "child")]:
-        await hypotheses.insert(conn, Hypothesis(id=hid, session_id=session.id, created_at=datetime.now(UTC),
-            created_by="evolution", strategy="simplify", parent_ids=[parent], title=hid, summary=hid,
-            full_text=hid, artifact_path="h.json"))
-    assert await sup._enqueue_protein_design_request(conn, session, "child", req | {"parent_hypothesis_id": "cv-hyp"})
-    assert not await sup._enqueue_protein_design_request(conn, session, "grandchild", req | {"parent_hypothesis_id": "child"})
-    async with conn.execute("SELECT payload FROM tasks WHERE target_id='child'") as cur:
-        assert json.loads((await cur.fetchone())[0])["design_iteration"] == 2
 
 
 @pytest.mark.asyncio
@@ -445,28 +275,6 @@ async def test_cached_results_survive_connection_restart(tmp_cfg, conn, monkeypa
             assert (await cur.fetchone())[0] == "done"
     finally:
         await fresh.close()
-
-
-def test_mock_campaign_never_overwrites_existing_real_files(tmp_cfg, tmp_path):
-    path = manifest(tmp_path)
-    out = tmp_path / "campaign"
-    (out / "04_eval").mkdir(parents=True)
-    original = out / "04_eval" / "kemp_0000_evaluation.json"
-    original.write_text('{"sample_name":"real-result"}')
-    with pytest.raises(ValueError):
-        AlphaProteinNovoAdapter(tmp_cfg).mock_campaign(str(path), str(out))
-    assert json.loads(original.read_text())["sample_name"] == "real-result"
-
-
-def test_campaign_symlink_does_not_import_foreign_metrics(tmp_cfg, tmp_path):
-    foreign = tmp_path / "foreign"
-    foreign.mkdir()
-    (foreign / "foreign_evaluation.json").write_text('{"metrics":{"private_metric":0.9}}')
-    root = tmp_path / "campaign"
-    root.mkdir()
-    (root / "04_eval").symlink_to(foreign, target_is_directory=True)
-    with pytest.raises(ValueError):
-        AlphaProteinNovoAdapter(tmp_cfg).inspect_campaign(str(root))
 
 
 @pytest.mark.parametrize("href", ["JaVaScRiPt:alert(1)", "java\nscript:alert(1)", "data:text/html,evil", "vbscript:evil"])
@@ -573,21 +381,6 @@ async def test_meta_feedback_does_not_reintroduce_simulation(tmp_cfg, conn):
     deps.llm.call.assert_not_awaited()
 
 
-def test_csv_scientific_notation_is_numeric():
-    result = evidence_from_campaign({"status": "real", "summary_rows": [{"sample_name": "d", "rmsd": "1e-3"}],
-        "evaluation_summary_csv": "summary.csv"}, session_id="s", task_id="t", hypothesis_id="h", artifact_path="a")
-    metric = next(r for r in result if r.metric_name == "rmsd")
-    assert metric.metric_value == 0.001 and metric.status == "real"
-
-
-def test_confidence_preserves_full_design_id(tmp_path):
-    path = tmp_path / "kemp_0000_variant_a_confidences_seed230.json"
-    path.write_text('{"ptm":0.8}')
-    result = evidence_from_campaign({"status": "real", "confidence_files": [str(path)]},
-        session_id="s", task_id="t", hypothesis_id="h", artifact_path="a")
-    assert next(r for r in result if r.metric_name == "ptm").design_id == "kemp_0000_variant_a"
-
-
 @pytest.mark.asyncio
 async def test_resume_restores_budget_before_provider_admission(tmp_cfg, conn, monkeypatch):
     session = await seed(conn)
@@ -631,15 +424,6 @@ async def test_duplicate_hypothesis_preserves_original_artifact(tmp_cfg, conn, m
 def test_config_repr_hides_secrets(tmp_cfg):
     tmp_cfg.secrets.OPENAI_API_KEY = "cv-fabricated-private-key"
     assert "cv-fabricated-private-key" not in repr(tmp_cfg)
-
-
-@pytest.mark.asyncio
-async def test_model_tool_cannot_write_outside_session(tmp_cfg, tmp_path):
-    result = await AlphaProteinNovoTool(tmp_cfg).call({"operation": "mock_campaign",
-        "manifest_path": str(manifest(tmp_path)), "output_dir": str(tmp_path / "foreign-campaign")},
-        ToolCtx(tmp_cfg, session_id="cv-session"))
-    assert result.is_error
-    assert not (tmp_path / "foreign-campaign").exists()
 
 
 @pytest.mark.asyncio
@@ -687,19 +471,6 @@ async def test_provider_metadata_connection_is_separate_from_scheduler(tmp_cfg, 
     sup = Supervisor(tmp_cfg)
     monkeypatch.setattr(sup, "_main_loop", mainloop)
     await sup.run_session("", resume_session_id=session.id)
-
-
-@pytest.mark.asyncio
-async def test_apn_uses_process_group_and_spooled_logs(tmp_cfg, tmp_path, monkeypatch):
-    (tmp_path / "run_pipeline.py").write_text("# no model execution\n")
-    tmp_cfg.alpha_protein_novo.repo_path = str(tmp_path)
-    process = SimpleNamespace(returncode=0, communicate=AsyncMock(return_value=(b"", b"")))
-    spawn = AsyncMock(return_value=process)
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
-    await AlphaProteinNovoAdapter(tmp_cfg).run_pipeline(str(manifest(tmp_path)), str(tmp_path / "out"), allow_real=True)
-    assert spawn.call_args.kwargs.get("start_new_session") is True
-    assert spawn.call_args.kwargs["stdout"] != asyncio.subprocess.PIPE
-    assert spawn.call_args.kwargs["stderr"] != asyncio.subprocess.PIPE
 
 
 @pytest.mark.asyncio
@@ -841,17 +612,6 @@ async def test_acceptance_round1_legacy_migration_preserves_rows(tmp_cfg, tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_acceptance_round1_mock_task_replay_preserves_evidence(tmp_cfg, conn, tmp_path):
-    await seed(conn)
-    task = await add_task(conn, payload={"manifest_path": str(manifest(tmp_path)), "output_dir": str(tmp_path / "mock"), "mode": "mock"})
-    agent = ScientificToolAgent(offline_deps(tmp_cfg, conn))
-    first = await agent.execute(task)
-    second = await agent.execute(task)
-    assert first.extra["evidence_ids"] == second.extra["evidence_ids"]
-    assert len(await evidence.list_for_task(conn, task.id)) == 11
-
-
-@pytest.mark.asyncio
 async def test_acceptance_round2_conflicting_writers_cannot_replace_measurement(tmp_cfg, conn):
     await seed(conn)
     await add_task(conn)
@@ -894,17 +654,6 @@ async def test_acceptance_round2_missing_llm_terminal_cannot_publish_hypothesis(
 
 
 @pytest.mark.asyncio
-async def test_acceptance_round2_queued_remote_shape_is_not_completed_evidence(tmp_cfg, conn, tmp_path, monkeypatch):
-    from co_scientist.science.worker import ComputeJob
-    await seed(conn)
-    task = await add_task(conn, payload={"manifest_path": str(manifest(tmp_path)), "output_dir": str(tmp_path / "out"), "mode": "mock"})
-    monkeypatch.setattr("co_scientist.science.worker.LocalAlphaProteinNovoWorker.submit", AsyncMock(return_value=ComputeJob("j", "queued", "fake")))
-    with pytest.raises(RuntimeError, match="did not complete"):
-        await ScientificToolAgent(offline_deps(tmp_cfg, conn)).execute(task)
-    assert await evidence.list_for_task(conn, task.id) == []
-
-
-@pytest.mark.asyncio
 async def test_acceptance_round2_slow_sse_is_bounded_and_unregisters():
     from co_scientist.orchestrator.events import EventBus
     bus = EventBus(max_buffer=4)
@@ -919,26 +668,6 @@ async def test_acceptance_round2_slow_sse_is_bounded_and_unregisters():
     assert all(q.qsize() <= 4 for q in bus._subs["a"])
     await gen.aclose()
     assert bus.subscriber_count("a") == 0
-
-
-@pytest.mark.asyncio
-async def test_acceptance_round2_cli_uses_same_admission_and_dedup(tmp_cfg, conn, tmp_path, monkeypatch):
-    from typer.testing import CliRunner
-
-    from co_scientist import cli
-    await seed(conn)
-    path = manifest(tmp_path)
-    monkeypatch.setattr(cli, "_common_setup", lambda *args: (tmp_cfg, None))
-    args = ["protein-design", "cv-session", "--hypothesis", "cv-hyp", "--manifest", str(path),
-            "--output-dir", str(tmp_path / "requested"), "--mode", "mock"]
-    runner = CliRunner()
-    first = await asyncio.to_thread(runner.invoke, cli.app, args)
-    second = await asyncio.to_thread(runner.invoke, cli.app, args)
-    assert first.exit_code == second.exit_code == 0, (first.output, second.output)
-    async with conn.execute("SELECT payload FROM tasks WHERE action='RunProteinDesign'") as cur:
-        rows = await cur.fetchall()
-    assert len(rows) == 1
-    assert str(tmp_cfg.session_artifact_dir("cv-session")) in json.loads(rows[0][0])["output_dir"]
 
 
 @pytest.mark.asyncio

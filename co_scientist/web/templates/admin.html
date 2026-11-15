@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="zh-CN" translate="no">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Co-Scientist · 管理</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='10' fill='%23202020'/%3E%3Cpath d='M10 10h12v12H10zM6 16h20M16 6v20' stroke='white' fill='none' stroke-width='1.5'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/studio.css">
+</head>
+<body class="login-page">
+  <main class="login-shell">
+    <a class="brand login-brand" href="/" aria-label="Co-Scientist 首页"><span class="brand-mark"><i></i><i></i><i></i><i></i></span><strong>Co-Scientist</strong></a>
+    {% if forbidden %}
+    <p class="empty-eyebrow">管理</p>
+    <h1>这个页面只对管理员开放</h1>
+    <p class="login-lead">当前身份是普通用户。研究工作区仍然可以继续使用。</p>
+    <p class="login-status"><a href="/">返回研究</a></p>
+    {% else %}
+    <p class="empty-eyebrow">管理员</p>
+    <h1>{{ account.username }}</h1>
+    <p class="login-lead">这里列出本机登录账号和研究数量。进入工作区后，研究流程与普通用户相同。</p>
+    <div class="login-metrics">
+      <div><strong>{{ accounts|length }}</strong><span>登录账号</span></div>
+      <div><strong>{{ session_count }}</strong><span>研究记录</span></div>
+    </div>
+    <div class="login-actions">
+      <a class="primary-button login-inline" href="/">进入研究工作区</a>
+      <form method="post" action="/logout"><button class="secondary-button" type="submit">退出登录</button></form>
+    </div>
+    <h2 class="login-list-title">账号</h2>
+    <ul class="login-list">
+      {% for row in accounts %}
+      <li><strong>{{ row.username }}</strong><span>{{ row.role_label }}</span><time>{{ row.created_at[:16] }}</time></li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </main>
+</body>
+</html>

@@ -178,26 +178,32 @@ def get_provider(
     if name == "claude_cli":
         from .cli_backend.claude_code import ClaudeCliProvider
 
-        return ClaudeCliProvider(cfg, db=db, budget=budget, retry_policy=retry_policy)
+        return _with_endpoints(cfg, db, budget, retry_policy, ClaudeCliProvider(
+            cfg, db=db, budget=budget, retry_policy=retry_policy,
+        ))
 
     if name == "codex_cli":
         from .cli_backend.codex import CodexCliProvider
 
-        return CodexCliProvider(cfg, db=db, budget=budget, retry_policy=retry_policy)
+        return _with_endpoints(cfg, db, budget, retry_policy, CodexCliProvider(
+            cfg, db=db, budget=budget, retry_policy=retry_policy,
+        ))
 
     if name == "anthropic":
         from .anthropic_client import AnthropicClient
 
-        return AnthropicClient(cfg, db=db, budget=budget, retry_policy=retry_policy)
+        return _with_endpoints(cfg, db, budget, retry_policy, AnthropicClient(
+            cfg, db=db, budget=budget, retry_policy=retry_policy,
+        ))
 
     if name in ("openai", "openai_compatible"):
         from .openai_client import OpenAIClient
 
-        return OpenAIClient(
+        return _with_endpoints(cfg, db, budget, retry_policy, OpenAIClient(
             cfg, db=db, budget=budget, retry_policy=retry_policy,
             compat_mode=(name == "openai_compatible"),
             provider_name=name,
-        )
+        ))
 
     # Named OpenAI-compat preset (openrouter, gemini, groq, together, ...).
     preset = OPENAI_COMPAT_PRESETS.get(name)
@@ -210,7 +216,7 @@ def get_provider(
         if headers_factory == "_openrouter_headers":
             default_headers = _openrouter_headers(cfg)
 
-        return OpenAIClient(
+        return _with_endpoints(cfg, db, budget, retry_policy, OpenAIClient(
             cfg,
             db=db, budget=budget, retry_policy=retry_policy,
             compat_mode=True,
@@ -218,10 +224,51 @@ def get_provider(
             preset_base_url=preset["base_url"],   # type: ignore[arg-type]
             preset_api_key_env=preset["api_key_env"],  # type: ignore[arg-type]
             default_headers=default_headers,
-        )
+        ))
 
     # Unreachable
     raise ValueError(f"unsupported LLM provider {name!r}")
+
+
+class EndpointRouter:
+    """Send a generation call to a named endpoint; everything else stays put."""
+
+    runs_own_loop = False
+
+    def __init__(self, cfg, *, db, budget, retry_policy, default: LLMProvider) -> None:
+        self._cfg = cfg
+        self._db = db
+        self._budget = budget
+        self._retry = retry_policy
+        self._default = default
+        self._clients: dict[str, LLMProvider] = {}
+
+    async def call(self, spec, ctx, *, est_input_tokens: int | None = None):
+        name = getattr(spec.route, "endpoint", "") or ""
+        if not name:
+            return await self._default.call(spec, ctx, est_input_tokens=est_input_tokens)
+        client = self._clients.get(name)
+        if client is None:
+            endpoint = self._cfg.llm.endpoints[name]
+            from .openai_client import OpenAIClient
+
+            client = OpenAIClient(
+                self._cfg, db=self._db, budget=self._budget, retry_policy=self._retry,
+                compat_mode=True, provider_name=name,
+                preset_base_url=endpoint.base_url,
+                preset_api_key_env=endpoint.api_key_env,
+                force_endpoint=True,
+            )
+            self._clients[name] = client
+        return await client.call(spec, ctx, est_input_tokens=est_input_tokens)
+
+
+def _with_endpoints(cfg, db, budget, retry_policy, provider: LLMProvider) -> LLMProvider:
+    if not getattr(cfg.llm, "endpoints", None):
+        return provider
+    return EndpointRouter(
+        cfg, db=db, budget=budget, retry_policy=retry_policy, default=provider,
+    )
 
 
 # --------------------------------------------------------------------------- #

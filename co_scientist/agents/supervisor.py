@@ -237,18 +237,8 @@ class Supervisor:
                     break
         if record is None:
             log.warning("parse_goal_no_record", note="falling back to bare ResearchPlan")
-            from ..safety.evidence import infer_molecule
-
-            target = self.cfg.run.target_molecule
-            return ResearchPlan(objective=goal.strip(), preferences=[], idea_attributes=[],
-                                target_molecule=infer_molecule(goal) if target == "unspecified" else target)
-        from ..safety.evidence import infer_molecule
-
-        target = self.cfg.run.target_molecule
-        if target == "unspecified":
-            target = infer_molecule(goal)
+            return ResearchPlan(objective=goal.strip(), preferences=[], idea_attributes=[])
         return ResearchPlan(
-            target_molecule=target,
             objective=record.get("objective", goal.strip()),
             preferences=record.get("preferences", []),
             constraints=record.get("constraints", []),
@@ -478,9 +468,9 @@ class Supervisor:
                     id=ids.task_id(), session_id=session.id,
                     created_at=datetime.now(UTC),
                     agent="reflection", action="ReviewHypothesis",
-                    target_id=hid, payload={"kind": "full"},
+                    target_id=hid, payload={"kind": "initial"},
                     priority=75, status="pending",
-                    idempotency_key=f"{hid}::review::full",
+                    idempotency_key=f"{hid}::review::initial",
                 ))
             if result.hypothesis_ids:
                 async with conn.execute("SELECT COUNT(*) FROM hypotheses WHERE session_id=?", (session.id,)) as cur:
@@ -491,24 +481,8 @@ class Supervisor:
                         created_at=datetime.now(UTC), agent="proximity", action="UpdateProximityGraph",
                         payload={"rebuild": True}, priority=90,
                         idempotency_key=f"{session.id}::proximity::pool::{bucket}"))
-            requests = result.extra.get("protein_design_requests") or []
-            singular = result.extra.get("protein_design_request")
-            if singular and not requests:
-                requests = [singular]
-            for index, request in enumerate(requests):
-                target_id = request.get("hypothesis_id") if isinstance(request, dict) else None
-                target_id = target_id or (result.hypothesis_ids[index] if index < len(result.hypothesis_ids) else None)
-                if target_id and target_id in result.hypothesis_ids:
-                    await self._enqueue_protein_design_request(conn, session, target_id, request)
         elif result.kind == "review_completed":
-            for hid in result.hypothesis_ids:
-                await enqueue_follow(Task(
-                    id=ids.task_id(), session_id=session.id,
-                    created_at=datetime.now(UTC),
-                    agent="ranking", action="AddToTournament",
-                    target_id=hid, payload={}, priority=80, status="pending",
-                    idempotency_key=f"{hid}::ranking::add",
-                ))
+            await self._continue_review(conn, session, result, enqueue_follow)
         elif result.kind == "added_to_tournament":
             for hid in result.hypothesis_ids:
                 await enqueue_follow(Task(
@@ -538,28 +512,65 @@ class Supervisor:
                     priority=200, status="pending",
                     idempotency_key=f"{session.id}::proximity::{mc}",
                 ))
-        elif result.kind == "protein_design_completed":
-            # The existing Reflection agent is the consumer of scientific
-            # evidence; Evolution then sees the resulting review as usual.
+
+    async def _evolution_strategies(self, conn, session_id: str) -> list[str]:
+        from ..orchestrator.strategy_effect import mean_elo_by_strategy, strategy_weights, weighted_order
+        elo = await mean_elo_by_strategy(conn, session_id)
+        return weighted_order(
+            list(self.cfg.evolution.strategies), strategy_weights(elo), f"{session_id}:evolution",
+        )
+
+    async def _improvement_choice(self, conn, session, seed: str) -> str:
+        from ..orchestrator.strategy_effect import origin_weights, sample_choice
+        return sample_choice(["evolution", "generation"], await origin_weights(conn, session.id), seed)
+
+    _NEXT_REVIEW = {
+        "initial": "full",
+        "full": "verification",
+        "verification": "observation",
+        "observation": "simulation",
+    }
+    _STOP_VERDICTS = {
+        "initial": {"disproved", "already_explained"},
+        "full": {"disproved"},
+        "verification": {"disproved"},
+        "observation": {"disproved"},
+    }
+
+    async def _continue_review(self, conn, session, result, enqueue_follow) -> None:
+        """Advance the review chain. Simulation is the last step before ranking.
+
+        A scientific-evidence refresh reviews the same hypothesis again and does
+        not restart the chain or create another tournament entry. Recurrent
+        reviews only record the new critique.
+        """
+        if result.extra.get("scientific_task_id"):
+            return
+        kind = result.extra.get("review_kind") or "full"
+        verdict = result.extra.get("verdict")
+        if verdict in self._STOP_VERDICTS.get(kind, ()):
+            for hid in result.hypothesis_ids:
+                await hyp_repo.set_state_if(
+                    conn, hid, new_state="rejected", expected_states=("draft", "reviewed"),
+                )
+            return
+        nxt = self._NEXT_REVIEW.get(kind)
+        if nxt:
             for hid in result.hypothesis_ids:
                 await enqueue_follow(Task(
-                    id=ids.task_id(), session_id=session.id,
-                    created_at=datetime.now(UTC), agent="reflection",
-                    action="ReviewHypothesis", target_id=hid,
-                    payload={"kind": "full", "scientific_task_id": task.id,
-                             "evidence_ids": result.extra.get("evidence_ids", [])},
-                    priority=125, status="pending",
-                    idempotency_key=f"{hid}::review::scientific::{task.id}",
+                    id=ids.task_id(), session_id=session.id, created_at=datetime.now(UTC),
+                    agent="reflection", action="ReviewHypothesis", target_id=hid,
+                    payload={"kind": nxt}, priority=75, status="pending",
+                    idempotency_key=f"{hid}::review::{nxt}",
                 ))
-
-    async def _enqueue_protein_design_request(
-        self, conn: aiosqlite.Connection, session: Session, hypothesis_id: str,
-        raw_request: dict[str, Any],
-    ) -> bool:
-        """Validate and enqueue one bounded, idempotent design iteration."""
-        from ..science.design_queue import enqueue_design
-
-        return await enqueue_design(self.cfg, session.id, hypothesis_id, raw_request)
+            return
+        if kind == "simulation":
+            for hid in result.hypothesis_ids:
+                await enqueue_follow(Task(
+                    id=ids.task_id(), session_id=session.id, created_at=datetime.now(UTC),
+                    agent="ranking", action="AddToTournament", target_id=hid, payload={},
+                    priority=80, status="pending",             idempotency_key=f"{hid}::ranking::add",
+                ))
 
     async def _enqueue_initial_generation(self, conn, session, n_initial):
         from ..storage.artifacts import entity_lock
@@ -608,8 +619,14 @@ class Supervisor:
                 continue
             count = min(space, self.cfg.generation.idle_batch_size)
             offset = len(rows)
+            from ..orchestrator.strategy_effect import mean_elo_by_strategy, strategy_weights, weighted_order
+            elo = await mean_elo_by_strategy(conn, session.id)
+            names = weighted_order(
+                list(self.cfg.generation.strategies), strategy_weights(elo),
+                f"{session.id}:generation:{offset}",
+            )
             inserted = 0
-            for i, strategy in enumerate(allocate(self.cfg, count, offset=offset)):
+            for i, strategy in enumerate(allocate(self.cfg, count, offset=offset, names=names)):
                 inserted += int(await task_repo.enqueue(conn, Task(id=ids.task_id(), session_id=session.id,
                     created_at=datetime.now(UTC), agent="generation", action="CreateInitialHypotheses",
                     payload={"strategy": strategy, "n": 1, "generation_round": round_index, "batch_index": i},
@@ -697,7 +714,7 @@ class Supervisor:
             task = Task(id=ids.task_id(), session_id=session.id, created_at=datetime.now(UTC),
                 agent="evolution", action="EvolveTopHypotheses", priority=90,
                 payload={"scheduling": "ready", "parent_ids": parents, "parent_review_ids": review_ids,
-                    "top_k": len(parents), "strategies": self.cfg.evolution.strategies,
+                    "top_k": len(parents), "strategies": await self._evolution_strategies(conn, session.id),
                     "maturity": gate, "candidate_revision": revision},
                 idempotency_key=f"{session.id}::evolution::ready::{revision}")
             inserted = await task_repo.enqueue(conn, task)
@@ -760,25 +777,38 @@ class Supervisor:
         gate = await self._maturity(conn, session, in_tournament)
         all_hyps = await hyp_repo.list_for_session(conn, session.id)
         revision = await pool_revision(conn, session.id, in_tournament)
-        evolution_scheduled = False
-        if not self._streaming_enabled(session) and gate["ready"] and len(all_hyps) < self.cfg.run.max_ideas:
-            inserted = await task_repo.enqueue(conn, Task(
+        can_evolve = (
+            not self._streaming_enabled(session)
+            and gate["ready"]
+            and len(all_hyps) < self.cfg.run.max_ideas
+        )
+        choice = "evolution"
+        if can_evolve:
+            choice = await self._improvement_choice(
+                conn, session, f"{session.id}:{anchor_mc}:{len(all_hyps)}",
+            )
+
+        async def enqueue_evolution() -> int:
+            return int(await task_repo.enqueue(conn, Task(
                 id=ids.task_id(), session_id=session.id,
                 created_at=datetime.now(UTC),
                 agent="evolution", action="EvolveTopHypotheses",
                 target_id=None,
                 payload={
                     "top_k": self.cfg.evolution.top_k,
-                    "strategies": self.cfg.evolution.strategies,
+                    "strategies": await self._evolution_strategies(conn, session.id),
                     "maturity": gate,
                 },
                 priority=140, status="pending",
                 idempotency_key=f"{session.id}::evolution::pool::{revision}",
-            ))
-            enqueued += int(inserted)
-            evolution_scheduled = inserted
+            )))
 
-        # Periodic meta-review (every ~5 minutes wall, approximated by match count).
+        evolution_scheduled = False
+        if can_evolve and choice == "evolution":
+            inserted = await enqueue_evolution()
+            enqueued += inserted
+            evolution_scheduled = bool(inserted)
+
         mc = await tourney_repo.count_matches(conn, session.id)
         async with conn.execute(
             """SELECT COUNT(*) AS n FROM system_feedback
@@ -799,7 +829,10 @@ class Supervisor:
             enqueued += int(inserted)
 
         if not evolution_scheduled:
-            enqueued += await self._schedule_idle_generation(conn, session)
+            generated = await self._schedule_idle_generation(conn, session)
+            enqueued += generated
+            if generated == 0 and can_evolve and choice == "generation":
+                enqueued += await enqueue_evolution()
         return enqueued
 
     async def _decide_lightweight(self, conn, session) -> int:
@@ -836,15 +869,22 @@ class Supervisor:
             await self._emit(conn, session.id, "research_policy", {
                 "label": "比较已足够; 先汇总证据缺口与系统反馈"})
             return 1
-        if (not self._streaming_enabled(session) and ready and len(all_hyps) < self.cfg.run.max_ideas
-                and await schedule("evolution", "EvolveTopHypotheses", f"evolve::{revision}", {
+        if (not self._streaming_enabled(session) and ready and len(all_hyps) < self.cfg.run.max_ideas):
+            choice = await self._improvement_choice(conn, session, f"{session.id}:light:{revision}")
+            if choice == "generation":
+                generated = await self._schedule_idle_generation(conn, session)
+                if generated:
+                    await self._emit(conn, session.id, "research_policy", {
+                        "label": "生成与演化都已有比赛结果; 这一轮按权重先补充新假设"})
+                    return generated
+            if await schedule("evolution", "EvolveTopHypotheses", f"evolve::{revision}", {
                     "top_k": min(self.cfg.evolution.top_k, len(pool)),
-                    "strategies": self.cfg.evolution.strategies[:2],
+                    "strategies": (await self._evolution_strategies(conn, session.id))[:2],
                     "maturity": gate,
-                })):
-            await self._emit(conn, session.id, "research_policy", {
-                "label": "小样本成熟门槛已达到; 根据反馈演化假设"})
-            return 1
+                }):
+                await self._emit(conn, session.id, "research_policy", {
+                    "label": "小样本成熟门槛已达到; 根据反馈演化假设"})
+                return 1
         if not ready or not pairs:
             generated = await self._schedule_idle_generation(conn, session)
             if generated:
@@ -972,12 +1012,6 @@ class Supervisor:
             "reflection": ReflectionAgent(deps),
             "ranking": RankingAgent(deps),
         }
-        try:
-            from .scientific_tool import ScientificToolAgent
-
-            out["scientific_tool"] = ScientificToolAgent(deps)
-        except ImportError:
-            pass
         # Evolution / Proximity / Meta-review register if importable.
         try:
             from .evolution import EvolutionAgent

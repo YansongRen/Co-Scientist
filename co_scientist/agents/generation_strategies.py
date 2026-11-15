@@ -12,14 +12,14 @@ class GenerationStrategy:
 
 STRATEGIES = {
     "literature": GenerationStrategy("generation.literature",
-        "Survey a handful of relevant sources using the available search/fetch tools; synthesize one testable mechanism."),
+        "Survey relevant sources, then call read_paper on each paper you will cite. Use the methods, results, and discussion it returns. If reading_depth is not full_text, say the claim rests on the abstract or that the full text was unavailable."),
     "debate": GenerationStrategy("generation.debate",
-        "In this single bounded call, simulate proposer, skeptical mechanist and experimentalist perspectives. "
-        "Consider counterarguments, reconcile disagreements, and register only the ONE final hypothesis. "
+        "The simulated proposer, skeptic and experimentalist turns above are already complete. "
+        "Reconcile them into the ONE final hypothesis. "
         "These are simulated perspectives, not independent experiments or external expert opinions."),
     "assumption": GenerationStrategy("generation.assumption",
-        "Identify a load-bearing assumption, challenge it with a plausible counterexample or alternative causal path, "
-        "then formulate ONE falsifiable hypothesis and the observation that would distinguish it from the assumption."),
+        "The assumption hops above are already complete. Aggregate them into ONE falsifiable hypothesis "
+        "and the observation that would distinguish it from the original assumption."),
     "feedback_driven": GenerationStrategy("generation.feedback_driven",
         "Use actual researcher/meta-review feedback to address an identified weakness or unexplored direction. "
         "Explain which feedback motivated the ONE new hypothesis; do not merely rephrase a prior candidate."),
@@ -31,7 +31,7 @@ entities, causal paths or counterexamples. If the pool already covers a directio
 another one. Renaming terms is not scientific novelty. Pool coverage is bounded and incomplete;
 absence from the excerpt does not prove novelty. Register exactly ONE record_hypothesis.
 Do not fabricate references, scientific results, catalytic motifs, ligands or local file paths.
-Only researcher-supplied validated inputs can support an optional protein_design_request.
+Only register one hypothesis.
 """
 
 
@@ -55,8 +55,8 @@ async def pool_context(deps, sid):
     return quote_untrusted(body[:deps.cfg.generation.context_chars], id_="bounded-hypothesis-pool")
 
 
-def allocate(cfg, count, *, offset=0):
-    names = cfg.generation.strategies
+def allocate(cfg, count, *, offset=0, names=None):
+    names = list(names) if names is not None else list(cfg.generation.strategies)
     if not names:
         raise ValueError("At least one Generation strategy is required")
     for name in names:

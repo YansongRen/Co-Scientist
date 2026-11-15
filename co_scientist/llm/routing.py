@@ -6,6 +6,7 @@ Costs are USD per 1M tokens (input / output / cache write / cache read).
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 
 from ..config import Config
@@ -117,6 +118,9 @@ _FAMILY_PRICE_HINTS: list[tuple[str, dict[str, float]]] = [
     ("mistral",    {"input": 2.0,  "output":  6.0, "cache_write": 2.0,  "cache_read": 0.2}),
     ("qwen",       {"input": 0.4,  "output":  0.4, "cache_write": 0.4,  "cache_read": 0.4}),
     ("deepseek",   {"input": 0.5,  "output":  1.5, "cache_write": 0.5,  "cache_read": 0.1}),
+    ("moonshot",   {"input": 0.6,  "output":  2.5, "cache_write": 0.6,  "cache_read": 0.1}),
+    ("kimi",       {"input": 0.6,  "output":  2.5, "cache_write": 0.6,  "cache_read": 0.1}),
+    ("glm",        {"input": 0.2,  "output":  1.1, "cache_write": 0.2,  "cache_read": 0.02}),
 ]
 
 
@@ -182,6 +186,7 @@ class ModelRoute:
     mode: str         # e.g. "generation.literature"
     model: str
     thinking_tokens: int = 0
+    endpoint: str = ""
 
 
 def thinking_budget_for(cfg: Config, mode: str) -> int:
@@ -191,20 +196,38 @@ def thinking_budget_for(cfg: Config, mode: str) -> int:
         "generation.literature":   th.generation_literature,
         "generation.debate":       th.generation_debate,
         "reflection.full":         th.reflection_full,
+        "reflection.initial":      th.reflection_initial,
         "reflection.verification": th.reflection_verification,
         "reflection.observation":  th.reflection_observation,
+        "reflection.simulation":   th.reflection_simulation,
+        "reflection.recurrent":    th.reflection_recurrent,
         "ranking.pairwise":        th.ranking_pairwise,
         "ranking.debate":          th.ranking_debate,
         "evolution.combine":       th.evolution_combine,
         "evolution.out_of_box":    th.evolution_out_of_box,
         "evolution.feasibility":   th.evolution_feasibility,
         "evolution.simplify":      th.evolution_simplify,
+        "evolution.grounding":     th.evolution_grounding,
         "metareview.system":       th.metareview_feedback,
         "metareview.final":        th.metareview_final,
     }.get(mode, 0)
 
 
-def route(cfg: Config, agent: str, mode: str | None = None, *, degraded: bool = False) -> ModelRoute:
+def generation_author(cfg: Config, *, task_id: str = "", batch_index: int | None = None) -> str:
+    """Pick which configured generation author writes this task."""
+    names = [
+        name for name in cfg.generation.authors
+        if name == "session" or name in cfg.llm.endpoints
+    ]
+    if not names:
+        return ""
+    if batch_index is None:
+        batch_index = int.from_bytes(hashlib.sha256(task_id.encode()).digest()[:2], "big")
+    return names[int(batch_index) % len(names)]
+
+
+def route(cfg: Config, agent: str, mode: str | None = None, *, degraded: bool = False,
+          endpoint: str = "") -> ModelRoute:
     """Pick a model for a given (agent, mode). If `degraded`, walk one step down."""
     m = cfg.models
     model = {
@@ -213,8 +236,11 @@ def route(cfg: Config, agent: str, mode: str | None = None, *, degraded: bool = 
         ("generation", "assumption"):  m.generation,
         ("generation", "feedback_driven"): m.generation,
         ("reflection", "full"):        m.reflection,
+        ("reflection", "initial"):     m.reflection,
         ("reflection", "verification"):m.reflection,
         ("reflection", "observation"): m.reflection,
+        ("reflection", "simulation"):  m.reflection,
+        ("reflection", "recurrent"):   m.reflection,
         ("ranking", "pairwise"):       m.ranking_pairwise,
         ("ranking", "debate"):         m.ranking_debate,
         ("ranking", "priority"):       m.ranking_priority,
@@ -222,6 +248,7 @@ def route(cfg: Config, agent: str, mode: str | None = None, *, degraded: bool = 
         ("evolution", "out_of_box"):   m.evolution,
         ("evolution", "feasibility"):  m.evolution,
         ("evolution", "simplify"):     m.evolution,
+        ("evolution", "grounding"):    m.evolution,
         ("metareview", "system"):      m.metareview_feedback,
         ("metareview", "final"):       m.metareview_final,
         ("parse_goal", None):          m.parse_goal,
@@ -229,8 +256,22 @@ def route(cfg: Config, agent: str, mode: str | None = None, *, degraded: bool = 
         ("judge", None):               m.judge,
     }.get((agent, mode), m.generation)
 
+    chosen_endpoint = ""
+    if agent == "generation":
+        chosen = endpoint
+        if chosen == "session":
+            chosen = ""
+        elif not chosen and cfg.generation.authors:
+            chosen = next((name for name in cfg.generation.authors if name in cfg.llm.endpoints), "")
+        elif not chosen and mode:
+            chosen = cfg.generation.endpoints.get(mode, "")
+        named = cfg.llm.endpoints.get(chosen) if chosen else None
+        if named is not None:
+            model = named.model
+            chosen_endpoint = chosen
+
     full_mode = f"{agent}.{mode}" if mode else agent
-    if degraded and full_mode not in NEVER_DEGRADE:
+    if degraded and full_mode not in NEVER_DEGRADE and not chosen_endpoint:
         model = degrade_model(model)
 
     th = thinking_budget_for(cfg, full_mode) if not degraded else 0
@@ -240,7 +281,9 @@ def route(cfg: Config, agent: str, mode: str | None = None, *, degraded: bool = 
     if "opus" not in model.lower():
         th = 0
 
-    return ModelRoute(agent=agent, mode=mode or "", model=model, thinking_tokens=th)
+    return ModelRoute(
+        agent=agent, mode=mode or "", model=model, thinking_tokens=th, endpoint=chosen_endpoint,
+    )
 
 
 def estimate_cost_usd(

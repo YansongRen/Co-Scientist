@@ -31,6 +31,6 @@ Review of hypothesis 2:
 {{ review_2 }}
 
 Persisted computational evidence (traceable data, not experimental activity):
-{{ scientific_evidence | default('No AlphaProtein Novo evidence is attached to either hypothesis.') }}
+{{ scientific_evidence | default('No computational evidence is attached to either hypothesis.') }}
 
 Reasoning and conclusion (end with "better idea: <1 or 2>"):

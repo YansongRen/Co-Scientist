@@ -26,7 +26,6 @@ DEFAULT_PROVIDER = "openrouter"
 
 class RunCfg(BaseModel):
     research_mode: Literal["standard", "lightweight"] = "standard"
-    target_molecule: Literal["unspecified", "DNA", "RNA"] = "unspecified"
     concurrency: int = 4
     max_ideas: int = 60
     max_matches_per_idea: int = 12
@@ -68,6 +67,14 @@ class GenerationCfg(BaseModel):
     context_chars: int = Field(6000, ge=500, le=20000)
     context_hypotheses: int = Field(16, ge=1, le=50)
     feedback_chars: int = Field(4000, ge=500, le=10000)
+    debate_turns: int = Field(3, ge=2, le=4)
+    assumption_hops: int = Field(3, ge=2, le=4)
+    # Authors that write generation hypotheses, in order. A name in
+    # `[llm.endpoints]` uses that endpoint; `session` uses the session provider.
+    # Empty keeps every generation call on the session provider.
+    authors: list[str] = Field(default_factory=list)
+    # Strategy or role name → `[llm.endpoints]` key. Used only when `authors` is empty.
+    endpoints: dict[str, str] = Field(default_factory=dict)
     idle_enabled: bool = True
     idle_batch_size: int = Field(1, ge=1, le=8)
     max_idle_rounds: int = Field(2, ge=0, le=20)
@@ -90,6 +97,7 @@ class RankingCfg(BaseModel):
     elo_initial: int = 1200
     debate_when_matches_lt: int = 2
     debate_when_elo_delta_lt: int = 50
+    debate_turns: int = Field(2, ge=1, le=4)
     batch_below_decile: bool = True
     batch_submit_every_seconds: int = 1800
     p_new: float = 0.4
@@ -117,8 +125,8 @@ class EvolutionCfg(BaseModel):
     min_mature: int = Field(20, ge=2)
     # How many top hypotheses to evolve per idle pass.
     top_k: int = Field(5, ge=2)
-    strategies: list[Literal["combine", "simplify", "feasibility", "out_of_box"]] = Field(
-        default_factory=lambda: ["combine", "simplify", "out_of_box"], min_length=1)
+    strategies: list[Literal["combine", "simplify", "feasibility", "out_of_box", "grounding"]] = Field(
+        default_factory=lambda: ["combine", "simplify", "out_of_box", "grounding"], min_length=1)
     small_pool_enabled: bool = True
     small_pool_max_initial: int = Field(10, ge=2)
     small_pool_max_usd: float = Field(2.0, gt=0)
@@ -182,23 +190,27 @@ class ThinkingCfg(BaseModel):
     generation_literature: int = 4000
     generation_debate: int = 8000
     reflection_full: int = 0
+    reflection_initial: int = 0
     reflection_verification: int = 12000
     reflection_observation: int = 6000
+    reflection_simulation: int = 0
+    reflection_recurrent: int = 0
     ranking_pairwise: int = 4000
     ranking_debate: int = 8000
     evolution_combine: int = 6000
     evolution_out_of_box: int = 6000
     evolution_feasibility: int = 0
     evolution_simplify: int = 0
+    evolution_grounding: int = 6000
     metareview_feedback: int = 8000
     metareview_final: int = 16000
 
 
 class ToolLoopCfg(BaseModel):
-    generation_max_iters: int = 8
-    reflection_max_iters: int = 8
+    generation_max_iters: int = 12
+    reflection_max_iters: int = 12
     ranking_max_iters: int = 3
-    evolution_max_iters: int = 6
+    evolution_max_iters: int = 10
     metareview_max_iters: int = 12
     parallel_cap: int = 4
     tool_timeout_seconds: int = 30
@@ -238,24 +250,6 @@ class CodeExecCfg(BaseModel):
     provider: str = "local"
     local_cpu_seconds: int = 30
     local_mem_mb: int = 512
-
-
-class AlphaProteinNovoCfg(BaseModel):
-    """Local paths and safety gates for the optional AP Novo adapter."""
-
-    enabled: bool = False
-    allow_real_runs: bool = False
-    repo_path: str = ""
-    python_executable: str = ""
-    apn_model_dir: str = ""
-    af3_model_dir: str = ""
-    timeout_seconds: int = 86_400
-    max_design_iterations: int = 3
-    max_design_tasks_per_session: int = 10
-    require_real_run_approval: bool = True
-    execution_backend: Literal["local", "remote"] = "local"
-    remote_worker_url: str = ""
-    remote_poll_seconds: int = 10
 
 
 class SafetyCfg(BaseModel):
@@ -339,6 +333,18 @@ class GeminiProviderCfg(BaseModel):
     thinking_by_mode: dict[str, ThinkingLevel] = Field(default_factory=dict)
 
 
+class EndpointCfg(BaseModel):
+    """One OpenAI-compatible endpoint used by a named generation route.
+
+    The API key stays in the environment named by `api_key_env`. It does not
+    replace the session provider used by review, ranking, or meta-review.
+    """
+
+    base_url: str
+    model: str
+    api_key_env: str
+
+
 class LLMCfg(BaseModel):
     """Choose what backs the agents: a metered API, or a subscription CLI.
 
@@ -388,6 +394,7 @@ class LLMCfg(BaseModel):
     gemini: GeminiProviderCfg = Field(default_factory=GeminiProviderCfg)
     claude_cli: ClaudeCliCfg = Field(default_factory=ClaudeCliCfg)
     codex_cli: CodexCliCfg = Field(default_factory=CodexCliCfg)
+    endpoints: dict[str, EndpointCfg] = Field(default_factory=dict)
 
 
 class WebUICfg(BaseModel):
@@ -421,6 +428,8 @@ class Secrets(BaseSettings):
     BRAVE_API_KEY: str = Field(default="", repr=False)
     NCBI_API_KEY: str = Field(default="", repr=False)
     OPENALEX_API_KEY: str = Field(default="", repr=False)
+    KIMI_API_KEY: str = Field(default="", repr=False)
+    GLM_API_KEY: str = Field(default="", repr=False)
 
 
 class ScopingCfg(BaseModel):
@@ -468,7 +477,6 @@ class Config(BaseModel):
     web_search: WebSearchCfg = Field(default_factory=WebSearchCfg)
     web_fetch: WebFetchCfg = Field(default_factory=WebFetchCfg)
     code_exec: CodeExecCfg = Field(default_factory=CodeExecCfg)
-    alpha_protein_novo: AlphaProteinNovoCfg = Field(default_factory=AlphaProteinNovoCfg)
     safety: SafetyCfg = Field(default_factory=SafetyCfg)
     llm: LLMCfg = Field(default_factory=LLMCfg)
     web_ui: WebUICfg = Field(default_factory=WebUICfg)

@@ -1,10 +1,11 @@
-"""Evolution agent — combines, simplifies, and reimagines top hypotheses.
+"""Evolution agent — combines, simplifies, grounds, and reimagines top hypotheses.
 
-Four strategies:
+Strategies:
 - `combine`     — merge two distant top hypotheses into a stronger one.
 - `simplify`    — strip a hypothesis to its load-bearing claim.
 - `feasibility` — make it implementable with current tech.
 - `out_of_box`  — out-of-box synthesis inspired by top-K.
+- `grounding`   — search the literature and fill one reasoning gap in a new child.
 
 Each produces a *new* hypothesis row with `parent_ids` populated, which then
 cascades into Reflection → Ranking like any fresh idea.
@@ -21,10 +22,8 @@ from ..llm.tool_loop import ToolLoopExhausted, run_tool_loop
 from ..llm.types import AgentCallSpec, CachedBlock, CallContext
 from ..logging import get_logger
 from ..models import CitedPaper, Hypothesis, Task, TaskResult
-from ..safety.evidence import NOVELTY_POLICY, annotate_record, audit_summary, infer_molecule
+from ..safety.evidence import NOVELTY_POLICY, annotate_record, audit_summary
 from ..safety.quoting import quote_hypothesis
-from ..science.alphaprotein_novo import AlphaProteinNovoAdapter
-from ..storage.artifacts import read_json
 from ..storage.repos import feedback as fb_repo
 from ..storage.repos import hypotheses as hyp_repo
 from ..storage.repos import reviews as rev_repo
@@ -38,7 +37,7 @@ from .schemas import RECORD_HYPOTHESIS_TOOL
 
 log = get_logger("evolution")
 
-EvoStrategy = Literal["combine", "simplify", "feasibility", "out_of_box"]
+EvoStrategy = Literal["combine", "simplify", "feasibility", "out_of_box", "grounding"]
 
 
 class EvolutionAgent(BaseAgent):
@@ -46,7 +45,7 @@ class EvolutionAgent(BaseAgent):
 
     async def execute(self, task: Task) -> TaskResult:
         strategies: list[EvoStrategy] = task.payload.get("strategies") or self.deps.cfg.evolution.strategies
-        if any(s not in ("combine", "simplify", "feasibility", "out_of_box") for s in strategies):
+        if any(s not in ("combine", "simplify", "feasibility", "out_of_box", "grounding") for s in strategies):
             raise ValueError("Unsupported Evolution strategy")
         top_k = int(task.payload.get("top_k", 5))
 
@@ -78,7 +77,6 @@ class EvolutionAgent(BaseAgent):
             return TaskResult(kind="noop", extra={"reason": "need at least 2 top hypotheses"})
 
         new_ids: list[str] = []
-        design_requests: list[dict[str, Any]] = []
         attempted = []
         for strat in strategies:
             current = await hyp_repo.list_for_session(self.deps.db, session.id)
@@ -88,14 +86,12 @@ class EvolutionAgent(BaseAgent):
             await self._activity(task, "正在根据反馈演化假设", strategy=strat,
                                  hypothesis_ids=[h.id for h in top])
             try:
-                hid, request = await self._evolve_one(session, top, strategy=strat)
+                hid = await self._evolve_one(session, top, strategy=strat)
             except Exception as e:
                 log.warning("evolution_strategy_failed", strategy=strat, err=str(e))
                 continue
             if hid:
                 new_ids.append(hid)
-                if request is not None:
-                    design_requests.append(request)
 
         return TaskResult(
             kind="hypothesis_created",
@@ -104,9 +100,6 @@ class EvolutionAgent(BaseAgent):
                 "strategies_used": attempted,
                 "parent_ids": [h.id for h in top],
                 "parent_review_ids": task.payload.get("parent_review_ids", {}),
-                "protein_design_requests": design_requests,
-                # Keep the singular key for older Supervisor integrations.
-                "protein_design_request": design_requests[0] if len(design_requests) == 1 else None,
             },
         )
 
@@ -114,18 +107,18 @@ class EvolutionAgent(BaseAgent):
 
     async def _evolve_one(
         self, session, top: list[Hypothesis], *, strategy: EvoStrategy
-    ) -> tuple[str | None, dict[str, Any] | None]:
+    ) -> str | None:
         if strategy == "combine":
             return await self._combine(session, top)
         if strategy == "out_of_box":
             return await self._out_of_box(session, top)
         return await self._unary(session, top, strategy=strategy)
 
-    async def _combine(self, session, top: list[Hypothesis]) -> tuple[str | None, dict[str, Any] | None]:
+    async def _combine(self, session, top: list[Hypothesis]) -> str | None:
         # Pick the most idea-distant pair within the top set.
         pair = await self._most_distant_pair(session.id, top)
         if pair is None:
-            return None, None
+            return None
         a, b = pair
         review_a = await self._best_review(a.id)
         review_b = await self._best_review(b.id)
@@ -142,7 +135,7 @@ class EvolutionAgent(BaseAgent):
             mode_for_route="combine", parent_ids=[a.id, b.id],
         )
 
-    async def _out_of_box(self, session, top: list[Hypothesis]) -> tuple[str | None, dict[str, Any] | None]:
+    async def _out_of_box(self, session, top: list[Hypothesis]) -> str | None:
         inspirations = top[:5]
         prompt = render(
             "evolution.out_of_box",
@@ -161,7 +154,7 @@ class EvolutionAgent(BaseAgent):
 
     async def _unary(
         self, session, top: list[Hypothesis], *, strategy: EvoStrategy
-    ) -> tuple[str | None, dict[str, Any] | None]:
+    ) -> str | None:
         h = top[0]
         review = await self._best_review(h.id)
         template = f"evolution.{strategy}"
@@ -188,7 +181,7 @@ class EvolutionAgent(BaseAgent):
         strategy: EvoStrategy,
         mode_for_route: str,
         parent_ids: list[str],
-    ) -> tuple[str | None, dict[str, Any] | None]:
+    ) -> str | None:
         sys_blocks = [
             CachedBlock(self._system_prompt_header() + "\n" + NOVELTY_POLICY, cache=True),
             CachedBlock(
@@ -227,37 +220,25 @@ class EvolutionAgent(BaseAgent):
             )
         except ToolLoopExhausted as e:
             log.warning("evolution_tool_loop_exhausted", err=str(e))
-            return None, None
+            return None
 
         record = self._final_tool_use(result.response, "record_hypothesis")
         if record is None:
             log.warning("evolution_no_record")
-            return None, None
+            return None
 
         # Citation URL filter (same as Generation).
         record["citations"] = [
             c for c in record.get("citations", [])
             if isinstance(c, dict) and c.get("url") in result.seen_urls
         ]
-        annotate_record(record, result, molecule=session.research_plan.target_molecule if session.research_plan.target_molecule != "unknown" else infer_molecule(session.research_goal))
+        annotate_record(record, result)
         record["strategy"] = strategy
         record["parent_ids"] = parent_ids
 
-        design_request = _valid_protein_design_request(
-            self.deps, record.get("protein_design_request"), parent_ids=parent_ids
-        )
-        if design_request is not None:
-            record["protein_design_request"] = design_request
-
         hid, was_new = await self._persist(session.id, record, strategy=strategy)
         exact = hid == ids.hypothesis_id(session.id, f"evolution/{strategy}", record.get("statement") or record.get("title") or "")
-        if not was_new and exact:
-            existing = await hyp_repo.fetch(self.deps.db, hid)
-            stored = (await read_json(self.deps.cfg, existing.artifact_path))["record"]
-            design_request = _valid_protein_design_request(self.deps, stored.get("protein_design_request"), parent_ids=existing.parent_ids)
-        if design_request is not None and exact:
-            design_request["hypothesis_id"] = hid
-        return (hid if was_new or exact else None), (design_request if was_new or exact else None)
+        return hid if was_new or exact else None
 
     async def _persist(self, session_id: str, record: dict[str, Any], *, strategy: str) -> tuple[str | None, bool]:
         citations = [CitedPaper(title=c.get("title", ""), url=c["url"], excerpt=c.get("excerpt"),
@@ -314,26 +295,6 @@ class EvolutionAgent(BaseAgent):
         return await scientific_evidence_repo.render_for_agents(
             self.deps.db, hypothesis_ids, include_mock=False, include_invalid=False,
         )
-
-
-# ----------------------------- request validation ----------------------------- #
-
-
-def _valid_protein_design_request(
-    deps: AgentDeps, value: Any, *, parent_ids: list[str]
-) -> dict[str, Any] | None:
-    if not isinstance(value, dict):
-        return None
-    try:
-        request = AlphaProteinNovoAdapter(deps.cfg).validate_design_request(
-            value, parent_hypothesis_id=parent_ids[0] if parent_ids else None
-        )
-    except (OSError, TypeError, ValueError):
-        # A model cannot turn an invalid or fabricated path into a task.
-        return None
-    request.config_version = "alphaprotein_novo-v1"
-    request.requires_approval = request.mode == "real" and deps.cfg.alpha_protein_novo.require_real_run_approval
-    return request.model_dump(mode="json")
 
 
 # ----------------------------- formatting helpers ----------------------------- #

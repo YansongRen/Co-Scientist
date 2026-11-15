@@ -5,7 +5,6 @@ establish that it supports a claim. No fetching or model calls happen here.
 """
 from __future__ import annotations
 
-import re
 import unicodedata
 from datetime import UTC, datetime
 from typing import Any
@@ -22,11 +21,6 @@ NOVELTY_POLICY = (
 )
 
 
-def infer_molecule(text: str) -> str:
-    found = {term for term in ("DNA", "RNA") if re.search(rf"\b{term}\b", text, re.I)}
-    return "mixed" if len(found) == 2 else next(iter(found), "unknown")
-
-
 def collect_sources(body: Any, *, tool: str, failed: bool = False) -> list[dict]:
     if failed:
         return []
@@ -36,9 +30,20 @@ def collect_sources(body: Any, *, tool: str, failed: bool = False) -> list[dict]
         if isinstance(node, dict):
             urls = [node[k] for k in URL_KEYS if isinstance(node.get(k), str)
                     and node[k].startswith(("https://", "http://"))]
+            if tool == "read_paper":
+                urls.extend(u for u in node.get("aliases") or []
+                            if isinstance(u, str) and u.startswith(("https://", "http://")))
+                urls = list(dict.fromkeys(urls))
             text = next((node[k] for k in ("text", "abstract", "snippet", "content")
                          if isinstance(node.get(k), str) and node[k]), "")
-            level = "fetched_text" if tool == "web_fetch" else "abstract" if node.get("abstract") else "search_snippet"
+            if tool == "read_paper" and node.get("reading_depth") == "full_text":
+                level = "full_text"
+            elif tool == "read_paper":
+                level = "abstract"
+            elif tool == "web_fetch":
+                level = "fetched_text"
+            else:
+                level = "abstract" if node.get("abstract") else "search_snippet"
             for url in urls:
                 result.append({"url": url, "title": str(node.get("title") or "")[:500],
                                "text": text[:120_000], "level": level})
@@ -70,13 +75,8 @@ def audit_evidence(items: list, sources: list[dict], *, molecule="unknown", defa
         match = next((s for s in observed if len(quote) >= 25 and quote in _normalize(s["text"])), None)
         source = match or next((s for s in observed if s["text"]), {})
         title = str(item.get("title") or source.get("title") or "")
-        source_scope = infer_molecule(title + " " + excerpt + " " + source.get("text", ""))
+        source_scope = "unknown"
         warning = ""
-        if molecule in ("DNA", "RNA"):
-            if source_scope in ("DNA", "RNA") and source_scope != molecule:
-                warning = f"研究对象为 {molecule}; 此来源涉及 {source_scope}, 外推适用性尚未核验。"
-            elif source_scope == "mixed":
-                warning = f"来源同时涉及 DNA 与 RNA, 需核对引文是否适用于 {molecule}。"
         status = ("quote_found" if match else "no_excerpt" if not quote else
                   "quote_too_short" if len(quote) < 25 else
                   "quote_not_found" if source.get("text") else "not_checked")

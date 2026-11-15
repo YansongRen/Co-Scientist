@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+import aiosqlite
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -38,6 +39,11 @@ from ..storage.repos import hypotheses as hyp_repo
 from ..storage.repos import reviews as rev_repo
 from ..storage.repos import sessions as sess_repo
 from ..storage.repos import transcripts as tx_repo
+from .auth import (
+    COOKIE, MAX_AGE, account_by_username, current_account, insert_account,
+    list_accounts, role_open, sign_account, validate_password, validate_username,
+    verify_password,
+)
 from .inputs import InputBodyLimit, create_inputs_router
 from .research_start import LaunchOptions, prepare_research, schedule_research
 from .sanitize import render_markdown
@@ -61,6 +67,76 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     app.include_router(create_studio_router(cfg))
     app.include_router(create_scoping_router(cfg))
     app.include_router(create_inputs_router(cfg))
+
+    @app.get("/login", response_class=HTMLResponse)
+    async def login_page(request: Request) -> HTMLResponse:
+        return TEMPLATES.TemplateResponse(request, "login.html", await _login_page(cfg, request))
+
+    @app.post("/login", response_class=HTMLResponse)
+    async def login_submit(
+        request: Request,
+        role: str = Form(...),
+        username: str = Form(""),
+        password: str = Form(""),
+    ):
+        if role not in ("user", "admin"):
+            raise HTTPException(422, "未知身份")
+        conn = await db_mod.connect(cfg)
+        try:
+            try:
+                username = validate_username(username)
+                password = validate_password(password)
+            except ValueError as exc:
+                page = await _login_page(cfg, request, conn=conn, error=str(exc), error_role=role)
+                return TEMPLATES.TemplateResponse(request, "login.html", page, status_code=422)
+            row = await account_by_username(conn, username)
+            if row is None and await role_open(conn, role):
+                try:
+                    row = await insert_account(conn, username=username, password=password, role=role)
+                except aiosqlite.IntegrityError:
+                    page = await _login_page(cfg, request, conn=conn, error="这个账号已经存在", error_role=role)
+                    return TEMPLATES.TemplateResponse(request, "login.html", page, status_code=409)
+            elif row is None or not verify_password(password, row["password_hash"]):
+                page = await _login_page(cfg, request, conn=conn, error="账号或密码不正确", error_role=role)
+                return TEMPLATES.TemplateResponse(request, "login.html", page, status_code=401)
+            elif row["role"] != role:
+                page = await _login_page(
+                    cfg, request, conn=conn,
+                    error="这个账号属于另一种身份，请从对应入口进入。", error_role=role,
+                )
+                return TEMPLATES.TemplateResponse(request, "login.html", page, status_code=403)
+        finally:
+            await conn.close()
+        response = RedirectResponse("/admin" if role == "admin" else "/", status_code=303)
+        response.set_cookie(
+            COOKIE, sign_account(cfg, row["id"], row["role"]),
+            max_age=MAX_AGE, httponly=True, samesite="lax", path="/",
+        )
+        return response
+
+    @app.post("/logout")
+    async def logout() -> RedirectResponse:
+        response = RedirectResponse("/login", status_code=303)
+        response.delete_cookie(COOKIE, path="/")
+        return response
+
+    @app.get("/admin", response_class=HTMLResponse)
+    async def admin_page(request: Request) -> HTMLResponse:
+        conn = await db_mod.connect(cfg)
+        try:
+            account = await current_account(request, cfg, conn)
+            if account is None:
+                return RedirectResponse("/login", status_code=303)
+            if account["role"] != "admin":
+                return TEMPLATES.TemplateResponse(request, "admin.html", {"forbidden": True, "account": account})
+            async with conn.execute("SELECT COUNT(*) AS n FROM sessions") as cur:
+                session_count = (await cur.fetchone())["n"]
+            return TEMPLATES.TemplateResponse(request, "admin.html", {
+                "forbidden": False, "account": account,
+                "accounts": await list_accounts(conn), "session_count": session_count,
+            })
+        finally:
+            await conn.close()
 
     # ----------------------------- pages ----------------------------- #
 
@@ -89,13 +165,12 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         n_initial: int = Form(2, ge=1, le=20),
         wall_clock_seconds: int = Form(cfg.run.wall_clock_seconds, ge=60, le=7200),
         research_mode: Literal["standard", "lightweight"] = Form("lightweight"),
-        target_molecule: Literal["unspecified", "DNA", "RNA"] = Form("unspecified"),
     ):
         if not goal.strip() or len(goal) > 20000 or len(preferences) > 30000:
             raise HTTPException(422, "请输入有效的研究目标 (最多20000字)")
         try:
             options = LaunchOptions(concurrency=concurrency, budget_usd=budget_usd, budget_tokens=budget_tokens, upload_group_id=upload_group_id or None, n_initial=n_initial,
-                wall_clock_seconds=wall_clock_seconds, research_mode=research_mode, target_molecule=target_molecule)
+                wall_clock_seconds=wall_clock_seconds, research_mode=research_mode)
         except ValueError:
             raise HTTPException(422, "研究参数无效, 轻量研究需要2至6条初始假设") from None
         conn = await db_mod.connect(cfg)
@@ -297,6 +372,25 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         finally:
             await conn.close()
 
+    @app.post("/api/sessions/{session_id}/hypotheses")
+    async def api_propose(session_id: str, text: str = Form(...)) -> JSONResponse:
+        from ..agents.base import AgentDeps
+        from ..orchestrator.researcher import submit_researcher_hypothesis
+        from ..tools.registry import ToolRegistry
+
+        conn = await db_mod.connect(cfg)
+        try:
+            try:
+                out = await submit_researcher_hypothesis(
+                    AgentDeps(cfg, conn, None, ToolRegistry(cfg).discover()), session_id, text,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            await GLOBAL_BUS.publish(session_id, "researcher_hypothesis", out)
+            return JSONResponse({"ok": True, **out})
+        finally:
+            await conn.close()
+
     @app.get("/healthz")
     async def health() -> JSONResponse:
         return JSONResponse({"ok": True})
@@ -307,6 +401,23 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
 
 # ----------------------------- helpers ----------------------------- #
+
+
+async def _login_page(cfg: Config, request: Request, *, conn=None, error: str = "", error_role: str = "") -> dict[str, Any]:
+    own = conn is None
+    if own:
+        conn = await db_mod.connect(cfg)
+    try:
+        return {
+            "account": await current_account(request, cfg, conn),
+            "user_open": await role_open(conn, "user"),
+            "admin_open": await role_open(conn, "admin"),
+            "error": error,
+            "error_role": error_role,
+        }
+    finally:
+        if own:
+            await conn.close()
 
 
 async def _list_sessions(cfg: Config) -> list[dict[str, Any]]:

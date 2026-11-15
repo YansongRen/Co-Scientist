@@ -140,6 +140,7 @@ class OpenAIClient:
         preset_base_url: str | None = None,
         preset_api_key_env: str | None = None,
         default_headers: dict[str, str] | None = None,
+        force_endpoint: bool = False,
     ) -> None:
         """One client per session.
 
@@ -169,39 +170,47 @@ class OpenAIClient:
             cap_ms=cfg.retry.cap_ms,
         )
         self._compat_mode = compat_mode or preset_base_url is not None
+        self._force_endpoint = force_endpoint
         self._provider_name = provider_name or (
             "openai_compatible" if self._compat_mode else "openai"
         )
 
-        # API key resolution precedence:
-        #   1. explicit OPENAI_API_KEY (cfg.secrets or env)
-        #   2. preset-specific env var (e.g. OPENROUTER_API_KEY, GEMINI_API_KEY)
-        api_key = (
-            cfg.secrets.OPENAI_API_KEY
-            or os.environ.get("OPENAI_API_KEY")
-            or ""
-        )
-        if not api_key and preset_api_key_env:
+        if force_endpoint:
             api_key = (
-                getattr(cfg.secrets, preset_api_key_env, "")
-                or os.environ.get(preset_api_key_env)
+                getattr(cfg.secrets, preset_api_key_env or "", "")
+                or os.environ.get(preset_api_key_env or "")
                 or ""
+            )
+            base_url = preset_base_url
+        else:
+            # API key resolution precedence:
+            #   1. explicit OPENAI_API_KEY (cfg.secrets or env)
+            #   2. preset-specific env var (e.g. OPENROUTER_API_KEY, GEMINI_API_KEY)
+            api_key = (
+                cfg.secrets.OPENAI_API_KEY
+                or os.environ.get("OPENAI_API_KEY")
+                or ""
+            )
+            if not api_key and preset_api_key_env:
+                api_key = (
+                    getattr(cfg.secrets, preset_api_key_env, "")
+                    or os.environ.get(preset_api_key_env)
+                    or ""
+                )
+            base_url = (
+                getattr(cfg.llm.openai, "base_url", None)
+                or os.environ.get("OPENAI_BASE_URL")
+                or preset_base_url
             )
         # Local OpenAI-compat servers (Ollama, vLLM, LM Studio) often don't
         # need a real key but the SDK rejects an empty string.
-        if not api_key and self._compat_mode:
+        if not api_key and self._compat_mode and not force_endpoint:
             api_key = "compat-no-key"
         if not api_key:
             raise RuntimeError(
                 f"no API key set ({preset_api_key_env or 'OPENAI_API_KEY'})"
             )
 
-        # base_url precedence: explicit cfg / env > preset default.
-        base_url = (
-            getattr(cfg.llm.openai, "base_url", None)
-            or os.environ.get("OPENAI_BASE_URL")
-            or preset_base_url
-        )
         kwargs: dict[str, Any] = {"api_key": api_key}
         if base_url:
             kwargs["base_url"] = base_url
@@ -233,7 +242,9 @@ class OpenAIClient:
         )
         # Provider extensions, e.g. DeepSeek's explicit non-thinking mode
         # required for forced function calls, are opt-in configuration.
-        if self._cfg.llm.openai.extra_body:
+        # extra_body belongs to the session provider. A named generation
+        # endpoint has its own vendor and must not inherit that body.
+        if self._cfg.llm.openai.extra_body and not self._force_endpoint:
             request["extra_body"] = self._cfg.llm.openai.extra_body
 
         # Estimate + admit (same accounting as AnthropicClient).

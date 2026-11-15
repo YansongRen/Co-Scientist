@@ -15,7 +15,7 @@ async def eligible_pairs(conn, session_id, candidates, *, pair_cap=3, idea_cap=1
              and a.matches_played < idea_cap and b.matches_played < idea_cap]
     return sorted(pairs, key=lambda pair: (
         counts.get(tuple(sorted((pair[0].id, pair[1].id))), 0),
-        bool(pair[0].dedup_cluster and pair[0].dedup_cluster == pair[1].dedup_cluster),
+        not bool(pair[0].dedup_cluster and pair[0].dedup_cluster == pair[1].dedup_cluster),
         pair[0].matches_played + pair[1].matches_played,
         abs((pair[0].elo or 1200) - (pair[1].elo or 1200)),
         sorted((pair[0].id, pair[1].id))))

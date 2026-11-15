@@ -11,14 +11,15 @@ import re
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from ..config import Config
 from ..inputs import list_files, public_file
-from ..safety.evidence import audit_evidence, infer_molecule
+from ..safety.evidence import audit_evidence
 from ..storage import db as db_mod
 from ..storage.repos import events, hypotheses, reviews, sessions, transcripts
+from .auth import any_accounts, current_account
 from .runtime import runtime_snapshot
 from .sanitize import render_markdown
 
@@ -49,7 +50,16 @@ def create_studio_router(cfg: Config) -> APIRouter:
     @router.get("/", response_class=HTMLResponse)
     @router.get("/studio", response_class=HTMLResponse)
     async def workspace(request: Request):
+        conn = await db_mod.connect(cfg)
+        try:
+            account = await current_account(request, cfg, conn)
+            signed_out = account is None and await any_accounts(conn)
+        finally:
+            await conn.close()
+        if signed_out:
+            return RedirectResponse("/login", status_code=303)
         return TEMPLATES.TemplateResponse(request, "studio.html", {
+            "account": account,
             "defaults": {"budget": cfg.run.budget_usd, "wall_clock": cfg.run.wall_clock_seconds,
                          "budget_tokens": cfg.run.budget_tokens,
                          "model": "Mock" if getattr(request.app.state, "preview_only", False) else cfg.models.generation,
@@ -81,15 +91,12 @@ def create_studio_router(cfg: Config) -> APIRouter:
             sources: dict[str, dict] = {}
             evidence_cards = []
             novelty = []
-            molecule = session.research_plan.target_molecule
-            if molecule == "unknown":
-                molecule = infer_molecule(session.research_goal)
 
             def collect_cards(record, h, *, review_id=None):
                 cards = record.get("evidence_audit") if record.get("audit_version") == 1 else None
                 if not isinstance(cards, list):
                     cards = audit_evidence(record.get("evidence" if review_id else "citations", []),
-                        [], molecule=molecule, default_claim=h.summary)
+                        [], default_claim=h.summary)
                 for index, card in enumerate(cards):
                     if not isinstance(card, dict):
                         continue
@@ -122,7 +129,7 @@ def create_studio_router(cfg: Config) -> APIRouter:
                     review_record = _read_artifact(cfg, review.artifact_path, json_record=True)
                     add_sources(review_record.get("evidence", []))
                     collect_cards(review_record, h, review_id=review.id)
-                    h_reviews.append({"id": review.id, "verdict": review.verdict,
+                    h_reviews.append({"id": review.id, "kind": review.kind, "verdict": review.verdict,
                         "scores": review.scores.model_dump(), "html": render_markdown(review.body)})
                 result_hypotheses.append({"id": h.id, "title": h.title, "summary": h.summary,
                     "html": render_markdown(h.full_text), "elo": h.elo, "state": h.state,
@@ -138,10 +145,6 @@ def create_studio_router(cfg: Config) -> APIRouter:
                 known = sources.get(card["url"])
                 if known and card["title"] == card["url"]:
                     card["title"] = known["title"]
-                    scope = infer_molecule(card["title"] + " " + card["excerpt"])
-                    card["source_molecule"] = scope
-                    if molecule in ("DNA", "RNA") and scope in ("DNA", "RNA") and scope != molecule:
-                        card["scope_warning"] = f"研究对象为 {molecule}; 此来源涉及 {scope}, 外推适用性尚未核验。"
                 card["reference"] = f"S{list(sources).index(card['url'])+1}" if card["url"] in sources else "来源"
             run = session.config_snapshot.get("run", {})
             async with conn.execute("""SELECT agent,status,COUNT(*) n FROM tasks
@@ -171,7 +174,7 @@ def create_studio_router(cfg: Config) -> APIRouter:
                 "stages": stages, "matches": matches, "calls": calls,
                 "events": await events.recent(conn, session_id, limit=80), "usage": usage,
                 "runtime": await runtime_snapshot(cfg, conn, session),
-                "evidence": {"cards": evidence_cards, "novelty": novelty, "target_molecule": molecule,
+                "evidence": {"cards": evidence_cards, "novelty": novelty,
                     "summary": {"total": len(evidence_cards),
                         "quotes_matched": sum(c["quote_status"] == "quote_found" for c in evidence_cards),
                         "scope_warnings": sum(bool(c["scope_warning"]) for c in evidence_cards),

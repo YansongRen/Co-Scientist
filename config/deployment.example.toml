@@ -53,8 +53,3 @@ metareview_feedback = "anthropic/claude-sonnet-4-6"
 metareview_final = "anthropic/claude-sonnet-4-6"
 classifier = "anthropic/claude-haiku-4.5"
 judge = "anthropic/claude-sonnet-4-6"
-
-[alpha_protein_novo]
-enabled = false
-allow_real_runs = false
-require_real_run_approval = true

@@ -26,6 +26,10 @@ def session_id() -> str:
     return f"ses_{_ulid()}"
 
 
+def account_id() -> str:
+    return f"acc_{_ulid()}"
+
+
 def task_id() -> str:
     return f"tsk_{_ulid()}"
 

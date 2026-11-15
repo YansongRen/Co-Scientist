@@ -53,23 +53,12 @@ RECORD_HYPOTHESIS_TOOL: dict[str, Any] = {
             "strategy": {
                 "type": "string",
                 "enum": ["literature", "debate", "combine", "simplify",
-                         "out_of_box", "feasibility", "assumption", "feedback_driven"],
+                         "out_of_box", "feasibility", "grounding", "assumption", "feedback_driven"],
                 "description": "Strategy that produced this hypothesis (set by the agent).",
             },
             "parent_ids": {
                 "type": "array", "items": {"type": "string"},
                 "description": "Hypothesis IDs this one descends from (Evolution only).",
-            },
-            "protein_design_request": {
-                "type": "object",
-                "description": "Optional request only when the researcher supplied a complete local official AlphaProtein Novo manifest.",
-                "properties": {
-                    "manifest_path": {"type": "string"},
-                    "output_dir": {"type": "string"},
-                    "mode": {"type": "string", "enum": ["validate", "mock", "real"]},
-                    "rationale": {"type": "string"},
-                },
-                "required": ["manifest_path", "output_dir", "mode"],
             },
         },
         "required": [
@@ -102,7 +91,7 @@ RECORD_REVIEW_TOOL: dict[str, Any] = {
             },
             "kind": {
                 "type": "string",
-                "enum": ["full", "verification", "observation", "simulation"],
+                "enum": ["initial", "full", "verification", "observation", "simulation", "recurrent"],
                 "description": "Which review mode you ran.",
             },
             "novelty":     {"type": "number", "minimum": 0, "maximum": 1},
@@ -238,7 +227,7 @@ _EVIDENCE_FIELDS = {
     "relation": {"type": "string", "enum": ["supports", "contradicts", "context", "uncertain"],
                  "description": "Relation to the hypothesis. Use uncertain if applicability is unverified."},
     "support_level": {"type": "string", "enum": ["direct", "indirect", "background", "unknown"]},
-    "scope": {"type": "string", "description": "Source study conditions: DNA/RNA, organism, pore chemistry and basecaller when reported. State unknowns."},
+    "scope": {"type": "string", "description": "Source study conditions actually reported, such as organism, system, and assay. State unknowns."},
 }
 for _tool, _field in ((RECORD_HYPOTHESIS_TOOL, "citations"), (RECORD_REVIEW_TOOL, "evidence")):
     _tool["input_schema"]["properties"][_field]["items"]["properties"].update(_EVIDENCE_FIELDS)

@@ -6,7 +6,7 @@
 
 - 当前没有完整的用户登录、项目级 ACL 和每用户配额；未加认证前只适合私有网络或受保护的内部环境。
 - API Key 只通过环境变量传给服务端，不要写入 `deployment.toml`、Dockerfile 或前端。
-- AlphaProtein Novo 真实计算默认关闭；没有 GPU、权重和人工审批时不要打开 `allow_real_runs`。
+- 蛋白质结构预测和设计计算不在当前产品里。
 - SQLite 数据必须挂载持久化卷，不能使用容器临时文件系统。
 - 当前 `scripts/scoping_preview.py` 是 Mock 预览，不是生产启动入口。
 
@@ -36,5 +36,4 @@ docker compose -f docker-compose.example.yml up --build
 2. 确认 `/healthz`、上传大小限制、预算上限和错误日志不包含 API Key。
 3. 在反向代理或平台层启用 HTTPS，并增加登录/访问控制。
 4. 配置数据库备份；不要把 SQLite 文件放在临时磁盘。
-5. 先保持 AlphaProtein Novo 关闭，确认 GPU Worker、权重许可和人工审核流程后再单独接入。
-6. 设置 API 供应商侧的硬额度；应用内预算是防护措施，不是供应商账单保证。
+5. 设置 API 供应商侧的硬额度；应用内预算是防护措施，不是供应商账单保证。

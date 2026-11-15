@@ -13,7 +13,6 @@ from .. import inputs as user_inputs
 from ..logging import get_logger
 from ..models import ResearchPlan, Session
 from ..models.scoping import ResearchBrief
-from ..safety.evidence import infer_molecule
 from ..storage import db
 from ..storage.repos import events, sessions
 
@@ -28,7 +27,6 @@ class LaunchOptions(BaseModel):
     n_initial: int = Field(2, ge=1, le=20)
     wall_clock_seconds: int = Field(600, ge=60, le=7200)
     research_mode: Literal["standard", "lightweight"] = "lightweight"
-    target_molecule: Literal["unspecified", "DNA", "RNA"] = "unspecified"
 
     @model_validator(mode="after")
     def lightweight_range(self):
@@ -45,7 +43,6 @@ def config_for_launch(cfg, options):
     cfg.run.wall_clock_seconds = options.wall_clock_seconds
     cfg.run.concurrency = options.concurrency
     cfg.run.research_mode = options.research_mode
-    cfg.run.target_molecule = options.target_molecule
     if options.research_mode == "lightweight":
         cfg.run.max_ideas = min(cfg.run.max_ideas, 6)
     return cfg
@@ -64,10 +61,7 @@ async def prepare_research(conn, cfg, options, *, goal, preferences="", brief: R
     for material in materials:
         material["image_content_available"] = material["attachment_id"] in image_ids
     preferences += user_inputs.as_prompt(materials)
-    if options.target_molecule != "unspecified":
-        preferences += f"\nResearch scope: {options.target_molecule}; other molecule evidence is unverified extrapolation."
-    molecule = options.target_molecule if options.target_molecule != "unspecified" else infer_molecule(goal)
-    plan = ResearchPlan(objective=goal, target_molecule=molecule, preferences=[preferences] if preferences else [],
+    plan = ResearchPlan(objective=goal, target_molecule="unknown", preferences=[preferences] if preferences else [],
                         constraints=[f"[{c.source}] {c.text}" for c in brief.constraints] if brief else [],
                         notes=f"User-confirmed Research Brief; scoping draft {draft_id}" if brief else None)
     snap = json.loads(run_cfg.model_dump_json(exclude={"secrets"}))

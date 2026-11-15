@@ -48,7 +48,7 @@ Nginx 配置中的 `proxy_buffering off` 对 SSE Agent 活动流很重要；较�
 curl -fsS https://your-domain.example/healthz
 ```
 
-先用 Mock 或极低预算创建一个测试任务，确认：上传、Research Brief、Session 创建、SSE 活动、暂停和错误提示都正常，再开放给朋友。AlphaProtein Novo 真实计算仍保持关闭，除非 GPU Worker、模型权重、许可和人工审核已经单独配置。
+先用 Mock 或极低预算创建一个测试任务，确认：上传、Research Brief、Session 创建、SSE 活动、暂停和错误提示都正常，再开放给朋友。当前版本不包含蛋白质结构预测或设计计算。
 
 ## 重要限制
 

@@ -5,8 +5,6 @@ Fixtures assert plumbing and provenance, never biological performance.
 from __future__ import annotations
 
 import asyncio
-import json
-from collections import Counter
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
@@ -18,7 +16,6 @@ from co_scientist.llm.types import LLMResponse, SynthMessage, TextBlock, ToolUse
 from co_scientist.models import ResearchPlan, Session, Task
 from co_scientist.orchestrator.termination import StabilityTracker
 from co_scientist.storage.repos import hypotheses, sessions, tasks
-from co_scientist.storage.repos import scientific_evidence as evidence
 from co_scientist.tools.registry import ToolRegistry
 
 
@@ -41,8 +38,6 @@ class ScriptedLLM:
             record = {"title": f"Offline candidate {self.generations}", "statement": statement,
                 "mechanism": statement, "entities": ["Kemp example"], "anticipated_outcomes": "Unknown until experimental testing.",
                 "novelty_argument": "Not evaluated by this software fixture.", "citations": []}
-            if self.path and self.generations in {1, 3}:
-                record["protein_design_request"] = {"manifest_path": str(self.path), "output_dir": str(self.output), "mode": "mock"}
             blocks = [ToolUseBlock(name="record_hypothesis", input=record)]
         elif ctx.agent == "reflection":
             record = {"verdict": "missing_piece", "kind": "full", "evidence": [], "novelty": 0.5,
@@ -60,8 +55,8 @@ class ScriptedLLM:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("protein,concurrency", [(False, 1), (True, 1), (True, 3)])
-async def test_all_six_agents_and_second_design_round(tmp_cfg, conn, tmp_path, monkeypatch, protein, concurrency):
+@pytest.mark.parametrize("concurrency", [1, 3])
+async def test_all_six_agents_and_second_design_round(tmp_cfg, conn, tmp_path, monkeypatch, concurrency):
     # Explicit hash embeddings prevent environment API keys selecting a provider.
     tmp_cfg.embeddings.provider = "hash"
     tmp_cfg.vectors.dedup_cosine_threshold = 1.01
@@ -70,16 +65,12 @@ async def test_all_six_agents_and_second_design_round(tmp_cfg, conn, tmp_path, m
     tmp_cfg.run.max_ideas = 3
     tmp_cfg.ranking.lightweight_max_pair_matches = 1
     tmp_cfg.vectors.full_recluster_every_matches = 1
-    path = tmp_path / "kemp.json"
-    (tmp_path / "motif.cif").write_text("data_OFFLINE_NOT_A_REAL_MOTIF\n")
-    path.write_text(json.dumps({"defaults": {"input_file": "motif.cif", "motif_str": "A1", "motif_atoms": "A1:NE2"},
-        "designs": [{"name": "kemp", "num_designs": 1}], "evaluation": {"suite": "kemp_eliminase"}}))
     now = datetime.now(UTC)
     sid = "offline-integrated"
-    session = Session(id=sid, created_at=now, updated_at=now, status="running", research_goal="Public Kemp fixture" if protein else "Non-protein instrument calibration",
+    session = Session(id=sid, created_at=now, updated_at=now, status="running", research_goal="Non-protein instrument calibration",
         research_plan=ResearchPlan(objective="Offline mechanism validation"), config_snapshot={}, budget_tokens=100000, budget_usd=1)
     await sessions.insert(conn, session)
-    llm = ScriptedLLM(path if protein else None, tmp_path / "ignored-model-path")
+    llm = ScriptedLLM(None, tmp_path / "ignored-model-path")
     deps = AgentDeps(tmp_cfg, conn, llm, ToolRegistry(tmp_cfg).discover())
     runner, policy = Supervisor(tmp_cfg), Supervisor(tmp_cfg)
     monkeypatch.setattr(runner, "_decide_next_steps", AsyncMock(return_value=0))
@@ -100,24 +91,6 @@ async def test_all_six_agents_and_second_design_round(tmp_cfg, conn, tmp_path, m
     async with conn.execute("SELECT COUNT(*) n FROM tournament_matches WHERE session_id=? GROUP BY MIN(hyp_a,hyp_b),MAX(hyp_a,hyp_b)", (sid,)) as cur:
         assert all(r["n"] <= 1 for r in await cur.fetchall())
     assert {t["agent"] for t in results} >= {"generation", "reflection", "ranking", "evolution", "proximity", "metareview"}
-    designs = [t for t in results if t["agent"] == "scientific_tool"]
-    if protein:
-        assert len(designs) == 2
-        child_task = next(t for t in designs if t["target_id"] == evolved.id)
-        payload = json.loads(child_task["payload"])
-        assert payload["design_iteration"] == 2
-        assert payload["parent_hypothesis_id"] in evolved.parent_ids
-        rows = await evidence.list_for_task(conn, child_task["id"])
-        assert len(rows) == 11 and {r.status for r in rows} == {"mock"}
-        assert {r.design_iteration for r in rows} == {2}
-        assert await evidence.render_for_agents(conn, [evolved.id], include_mock=False, include_invalid=False)
-        for call in llm.calls:
-            if call["agent"] in {"ranking", "evolution"}:
-                assert "value=0.84" not in call["prompt"]
-    else:
-        assert designs == []
+    assert not any(t["agent"] == "scientific_tool" for t in results)
     await runner._finalize(conn, deps, session, None)
     assert (await sessions.fetch(conn, sid)).status == "done"
-    print(json.dumps({"case": f"protein={protein},concurrency={concurrency}", "tasks": Counter(t["agent"] for t in results),
-        "designs": [{"task_id": t["id"], "hypothesis_id": t["target_id"], "iteration": json.loads(t["payload"])["design_iteration"]} for t in designs],
-        "llm_calls": len(llm.calls), "cost_usd": 0, "data_dir": str(tmp_cfg.data_dir)}, ensure_ascii=False))

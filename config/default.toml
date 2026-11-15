@@ -40,6 +40,8 @@ strategies = ["literature", "debate", "assumption", "feedback_driven"]
 context_chars = 6000
 context_hypotheses = 16
 feedback_chars = 4000
+debate_turns = 3
+assumption_hops = 3
 idle_enabled = true
 idle_batch_size = 1
 max_idle_rounds = 2
@@ -59,6 +61,7 @@ k_factor_warm = 16
 elo_initial = 1200
 debate_when_matches_lt = 2
 debate_when_elo_delta_lt = 50
+debate_turns = 2
 batch_below_decile = true
 batch_submit_every_seconds = 1800    # 30 min
 p_new = 0.4
@@ -84,7 +87,7 @@ max_streaming_rounds = 4
 min_mature = 20
 # How many top hypotheses to evolve per idle pass.
 top_k = 5
-strategies = ["combine", "simplify", "out_of_box"]
+strategies = ["combine", "simplify", "out_of_box", "grounding"]
 # Small initial pools, or budget <= small_pool_max_usd with a small current
 # pool, can evolve without 20 mature candidates. Large runs retain min_mature.
 small_pool_enabled = true
@@ -166,10 +169,10 @@ metareview_final        = 16000
 # record when the agent finishes without one. parallel_cap and
 # tool_timeout_seconds are enforced inside the MCP tool server.
 [tool_loop]
-generation_max_iters = 8
-reflection_max_iters = 8
+generation_max_iters = 12
+reflection_max_iters = 12
 ranking_max_iters    = 3
-evolution_max_iters  = 6
+evolution_max_iters  = 10
 metareview_max_iters = 12
 parallel_cap         = 4
 tool_timeout_seconds = 30

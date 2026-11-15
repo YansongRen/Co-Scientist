@@ -11,10 +11,10 @@ HypothesisState = Literal[
     "draft", "reviewed", "in_tournament", "pinned", "rejected", "quarantined", "retired"
 ]
 HypothesisStrategy = Literal[
-    "literature", "debate", "combine", "simplify", "out_of_box", "feasibility", "assumption",
-    "feedback_driven",
+    "literature", "debate", "combine", "simplify", "out_of_box", "feasibility", "grounding", "assumption",
+    "feedback_driven", "human",
 ]
-HypothesisOrigin = Literal["generation", "evolution"]
+HypothesisOrigin = Literal["generation", "evolution", "researcher"]
 
 
 class CitedPaper(BaseModel):

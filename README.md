@@ -27,9 +27,9 @@ This is an independent re-implementation in Python on top of pluggable LLM provi
 
 ## 本版本：科研网页与离线预览
 
-本仓库包含双模式科研入口、Research Scoping Assistant、可配置预算/时间/Token、文档与图片上传，以及 Co-Scientist × AlphaProtein Novo 的计算证据集成。
+本仓库包含双模式科研入口、Research Scoping Assistant、可配置预算/时间/Token、文档与图片上传，以及文献引文核查。
 
-**仓库不包含 API Key、`.env`、本地配置、数据库、上传材料或本机运行记录。** API 适配代码保留；真实模型需要使用者在服务端自行配置。默认离线预览不调用收费模型、不启动正式科研 Agent 或真实蛋白质计算。
+**仓库不包含 API Key、`.env`、本地配置、数据库、上传材料或本机运行记录。** API 适配代码保留；真实模型需要使用者在服务端自行配置。默认离线预览不调用收费模型，也不启动正式科研 Agent。
 
 ```bash
 python3.11 -m venv .venv
@@ -43,9 +43,8 @@ python scripts/scoping_preview.py --port 7883
 - [引导式研究、任务书、附件与预算](docs/research-scoping.md)
 - [部署与数据持久化](docs/deployment.md)
 - [阿里云与 systemd 部署](docs/deployment-aliyun.md)
-- [AlphaProtein Novo 适配与证据边界](docs/alphaprotein-novo-integration.md)
 
-本次交接前本地回归：**562 passed**（2026-11-10）；未进行新的付费 LLM、APN/AlphaFold 或实验验证。Mock 测试不能证明科研效果。
+本次交接前本地回归：**562 passed**（2026-11-10）；未进行新的付费 LLM 或实验验证。Mock 测试不能证明科研效果。
 
 交接入口：[开发约定](AGENTS.md)、[Cursor 交接说明](HANDOFF.md)。
 

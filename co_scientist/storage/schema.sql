@@ -25,8 +25,8 @@ CREATE TABLE IF NOT EXISTS hypotheses (
     id              TEXT PRIMARY KEY,                  -- deterministic sha256 prefix
     session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     created_at      TEXT NOT NULL,
-    created_by      TEXT NOT NULL,                     -- generation|evolution
-    strategy        TEXT NOT NULL,                     -- literature|debate|combine|simplify|out_of_box|feasibility
+    created_by      TEXT NOT NULL,                     -- generation|evolution|researcher
+    strategy        TEXT NOT NULL,                     -- literature|debate|assumption|feedback_driven|combine|simplify|out_of_box|feasibility|grounding|human
     parent_ids      TEXT,                              -- JSON array
     title           TEXT NOT NULL,
     summary         TEXT NOT NULL,
@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS reviews (
     hypothesis_id   TEXT NOT NULL REFERENCES hypotheses(id) ON DELETE CASCADE,
     session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     created_at      TEXT NOT NULL,
-    kind            TEXT NOT NULL,                     -- full|verification|observation|simulation
+    kind            TEXT NOT NULL,                     -- initial|full|verification|observation|simulation|recurrent
     verdict         TEXT,                              -- already_explained|other_more_likely|missing_piece|neutral|disproved
     novelty         REAL,
     correctness     REAL,
@@ -277,6 +277,15 @@ CREATE TABLE IF NOT EXISTS input_files (
     UNIQUE(group_id,sha256)
 );
 CREATE INDEX IF NOT EXISTS input_files_group ON input_files(group_id,created_at);
+
+CREATE TABLE IF NOT EXISTS accounts (
+    id              TEXT PRIMARY KEY,
+    username        TEXT NOT NULL UNIQUE,
+    password_hash   TEXT NOT NULL,
+    role            TEXT NOT NULL,                     -- admin|user
+    created_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS accounts_role ON accounts(role, created_at);
 
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version     INTEGER PRIMARY KEY,

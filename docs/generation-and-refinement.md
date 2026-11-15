@@ -9,13 +9,15 @@
 | 策略 | 行为 |
 | --- | --- |
 | `literature` | 使用有界文献查询，提出一条可检验机制 |
-| `debate` | 在单次模型调用中模拟不同论证视角，输出一条终稿 |
-| `assumption` | 质疑关键假设，提出反例、替代机制或区分性观察 |
+| `debate` | 先做有界多轮自我对弈（提议、质疑、可区分观察），再注册一条终稿 |
+| `assumption` | 逐层写出假设、子假设和区分性观察，再汇总成一条假说 |
 | `feedback_driven` | 根据已有研究者或 Meta-review 反馈生成；无反馈时明确 fallback 到 `assumption` |
 
 `[generation].strategies` 按配置顺序循环分配，重复项表示整数权重。初始任务和有界 idle refill 使用持久化幂等 key。未知策略、`n != 1` 或多个 `record_hypothesis` 终结记录会拒绝发布。每次任务只允许一个假说。
 
 生成上下文只读取有限的当前池摘要与反馈；配置见 `GenerationCfg` 和 `config/default.toml`。不会为了去重把全部历史全文放进 Prompt。标准队列、六类 Agent 和原工具链继续使用。
+
+`debate_turns` 和 `assumption_hops` 含最后一次注册调用，前面的回合不能调用 `record_hypothesis`。引用一篇论文的方法或结果之前，生成、审查和文献补强会调用 `read_paper` 读取开放全文；付费墙后的记录保持“只读摘要”。Ranking 的 debate 模式按 `debate_turns` 多轮比较，pairwise 仍是一轮。Evolution 的 `grounding` 用检索补一条新的子假说，不改写父假说。至少两种策略或两种来源已有比赛 Elo 后，空闲调度按权重抽样；不足两种时仍按配置顺序。总览末尾的联系人只抽取摘录里的 “Surname et al.” 或 “某某等人”。
 
 ## 保存与向量一致性
 
