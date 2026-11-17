@@ -8,42 +8,33 @@
   <link rel="stylesheet" href="/static/studio.css">
 </head>
 <body class="login-page">
-  <main class="login-shell">
+  <main class="login-shell login-narrow">
     <a class="brand login-brand" href="/login" aria-label="Co-Scientist 登录"><span class="brand-mark"><i></i><i></i><i></i><i></i></span><strong>Co-Scientist</strong></a>
     <p class="empty-eyebrow">登录</p>
     <h1>进入科研工作区</h1>
-    <p class="login-lead">选择身份后继续。普通用户进入研究，管理员查看本机账号与研究记录。账号只保存在这台电脑上。</p>
+    <p class="login-lead">使用账号登录。还没有账号时，可以在下面注册。</p>
     {% if account %}
-    <p class="login-status">当前已登录 {{ account.role_label }} · {{ account.username }}。<a href="/">返回研究</a>{% if account.role == "admin" %} · <a href="/admin">管理</a>{% endif %}</p>
+    <p class="login-status">当前已登录 {{ account.username }}。<a href="/">返回研究</a>{% if account.role == "admin" %} · <a href="/admin">管理</a>{% endif %}</p>
     {% endif %}
-    <div class="login-grid">
-      <section class="login-card" aria-labelledby="user-login-title">
-        <small>研究</small>
-        <h2 id="user-login-title">普通用户</h2>
-        <p>提出研究问题，查看假设、证据和运行记录。</p>
-        <form method="post" action="/login">
-          <input type="hidden" name="role" value="user">
-          <label>账号<input name="username" autocomplete="username" required minlength="2" maxlength="32"></label>
-          <label>密码<input name="password" type="password" autocomplete="{{ 'new-password' if user_open else 'current-password' }}" required minlength="8" maxlength="128"></label>
-          <button class="primary-button" type="submit">{{ "创建并进入" if user_open else "进入工作区" }} <svg><use href="#i-arrow"/></svg></button>
-          <p class="login-note">{{ "这个身份还没有账号，第一次提交会创建它。" if user_open else "使用已有的普通用户账号。" }}</p>
-          {% if error_role == "user" %}<p class="login-error" role="alert">{{ error }}</p>{% endif %}
-        </form>
-      </section>
-      <section class="login-card" aria-labelledby="admin-login-title">
-        <small>管理</small>
-        <h2 id="admin-login-title">管理员</h2>
-        <p>查看本机账号、研究数量，并进入同一个工作区。</p>
-        <form method="post" action="/login">
-          <input type="hidden" name="role" value="admin">
-          <label>账号<input name="username" autocomplete="username" required minlength="2" maxlength="32"></label>
-          <label>密码<input name="password" type="password" autocomplete="{{ 'new-password' if admin_open else 'current-password' }}" required minlength="8" maxlength="128"></label>
-          <button class="primary-button" type="submit">{{ "创建并进入" if admin_open else "进入管理" }} <svg><use href="#i-arrow"/></svg></button>
-          <p class="login-note">{{ "这个身份还没有账号，第一次提交会创建它。" if admin_open else "使用已有的管理员账号。" }}</p>
-          {% if error_role == "admin" %}<p class="login-error" role="alert">{{ error }}</p>{% endif %}
-        </form>
-      </section>
-    </div>
+    <section class="login-card" aria-labelledby="login-title">
+      <h2 id="login-title">登录</h2>
+      <form method="post" action="/login">
+        <label>账号<input name="username" autocomplete="username" required minlength="2" maxlength="32"></label>
+        <label>密码<input name="password" type="password" autocomplete="current-password" required minlength="6" maxlength="128"></label>
+        <button class="primary-button" type="submit">进入工作区 <svg><use href="#i-arrow"/></svg></button>
+        {% if error_form == "login" %}<p class="login-error" role="alert">{{ error }}</p>{% endif %}
+      </form>
+    </section>
+    <section class="login-card" aria-labelledby="register-title">
+      <h2 id="register-title">注册</h2>
+      <p>注册后即可提出研究问题，并查看自己的假设、证据和运行记录。</p>
+      <form method="post" action="/register">
+        <label>账号<input name="username" autocomplete="username" required minlength="2" maxlength="32"></label>
+        <label>密码<input name="password" type="password" autocomplete="new-password" required minlength="6" maxlength="128"></label>
+        <button class="primary-button" type="submit">注册并进入 <svg><use href="#i-arrow"/></svg></button>
+        {% if error_form == "register" %}<p class="login-error" role="alert">{{ error }}</p>{% endif %}
+      </form>
+    </section>
   </main>
   <svg class="sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
     <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M12 19V5m-6 6 6-6 6 6"/></symbol>

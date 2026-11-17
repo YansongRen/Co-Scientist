@@ -41,8 +41,8 @@ from ..storage.repos import sessions as sess_repo
 from ..storage.repos import transcripts as tx_repo
 from .auth import (
     COOKIE, MAX_AGE, account_by_username, current_account, insert_account,
-    list_accounts, role_open, sign_account, validate_password, validate_username,
-    verify_password,
+    ADMIN_USERNAME, ensure_admin, list_accounts, sign_account, validate_password,
+    validate_username, verify_password,
 )
 from .inputs import InputBodyLimit, create_inputs_router
 from .research_start import LaunchOptions, prepare_research, schedule_research
@@ -75,39 +75,57 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     @app.post("/login", response_class=HTMLResponse)
     async def login_submit(
         request: Request,
-        role: str = Form(...),
         username: str = Form(""),
         password: str = Form(""),
     ):
-        if role not in ("user", "admin"):
-            raise HTTPException(422, "未知身份")
         conn = await db_mod.connect(cfg)
         try:
+            await ensure_admin(conn)
             try:
                 username = validate_username(username)
                 password = validate_password(password)
             except ValueError as exc:
-                page = await _login_page(cfg, request, conn=conn, error=str(exc), error_role=role)
+                page = await _login_page(cfg, request, conn=conn, error=str(exc), error_form="login")
                 return TEMPLATES.TemplateResponse(request, "login.html", page, status_code=422)
             row = await account_by_username(conn, username)
-            if row is None and await role_open(conn, role):
-                try:
-                    row = await insert_account(conn, username=username, password=password, role=role)
-                except aiosqlite.IntegrityError:
-                    page = await _login_page(cfg, request, conn=conn, error="这个账号已经存在", error_role=role)
-                    return TEMPLATES.TemplateResponse(request, "login.html", page, status_code=409)
-            elif row is None or not verify_password(password, row["password_hash"]):
-                page = await _login_page(cfg, request, conn=conn, error="账号或密码不正确", error_role=role)
+            if row is None or not verify_password(password, row["password_hash"]):
+                page = await _login_page(cfg, request, conn=conn, error="账号或密码不正确", error_form="login")
                 return TEMPLATES.TemplateResponse(request, "login.html", page, status_code=401)
-            elif row["role"] != role:
-                page = await _login_page(
-                    cfg, request, conn=conn,
-                    error="这个账号属于另一种身份，请从对应入口进入。", error_role=role,
-                )
-                return TEMPLATES.TemplateResponse(request, "login.html", page, status_code=403)
         finally:
             await conn.close()
-        response = RedirectResponse("/admin" if role == "admin" else "/", status_code=303)
+        response = RedirectResponse("/admin" if row["role"] == "admin" else "/", status_code=303)
+        response.set_cookie(
+            COOKIE, sign_account(cfg, row["id"], row["role"]),
+            max_age=MAX_AGE, httponly=True, samesite="lax", path="/",
+        )
+        return response
+
+    @app.post("/register", response_class=HTMLResponse)
+    async def register_submit(
+        request: Request,
+        username: str = Form(""),
+        password: str = Form(""),
+    ):
+        conn = await db_mod.connect(cfg)
+        try:
+            await ensure_admin(conn)
+            try:
+                username = validate_username(username)
+                password = validate_password(password)
+            except ValueError as exc:
+                page = await _login_page(cfg, request, conn=conn, error=str(exc), error_form="register")
+                return TEMPLATES.TemplateResponse(request, "login.html", page, status_code=422)
+            if username == ADMIN_USERNAME:
+                page = await _login_page(cfg, request, conn=conn, error="这个账号不能注册", error_form="register")
+                return TEMPLATES.TemplateResponse(request, "login.html", page, status_code=409)
+            try:
+                row = await insert_account(conn, username=username, password=password, role="user")
+            except aiosqlite.IntegrityError:
+                page = await _login_page(cfg, request, conn=conn, error="这个账号已经存在，请直接登录", error_form="register")
+                return TEMPLATES.TemplateResponse(request, "login.html", page, status_code=409)
+        finally:
+            await conn.close()
+        response = RedirectResponse("/", status_code=303)
         response.set_cookie(
             COOKIE, sign_account(cfg, row["id"], row["role"]),
             max_age=MAX_AGE, httponly=True, samesite="lax", path="/",
@@ -403,17 +421,16 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 # ----------------------------- helpers ----------------------------- #
 
 
-async def _login_page(cfg: Config, request: Request, *, conn=None, error: str = "", error_role: str = "") -> dict[str, Any]:
+async def _login_page(cfg: Config, request: Request, *, conn=None, error: str = "", error_form: str = "") -> dict[str, Any]:
     own = conn is None
     if own:
         conn = await db_mod.connect(cfg)
     try:
+        await ensure_admin(conn)
         return {
             "account": await current_account(request, cfg, conn),
-            "user_open": await role_open(conn, "user"),
-            "admin_open": await role_open(conn, "admin"),
             "error": error,
-            "error_role": error_role,
+            "error_form": error_form,
         }
     finally:
         if own:

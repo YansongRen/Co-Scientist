@@ -46,9 +46,13 @@ def validate_username(value: str) -> str:
     return username
 
 
+ADMIN_USERNAME = "rys"
+ADMIN_PASSWORD = "123456"
+
+
 def validate_password(value: str) -> str:
-    if not 8 <= len(value) <= 128:
-        raise ValueError("密码需要 8 到 128 个字符")
+    if not 6 <= len(value) <= 128:
+        raise ValueError("密码需要 6 到 128 个字符")
     return value
 
 
@@ -111,11 +115,6 @@ def unsign_account(cfg: Config, token: str | None) -> tuple[str, str] | None:
     return account_id_, role
 
 
-async def role_open(conn, role: str) -> bool:
-    async with conn.execute("SELECT 1 FROM accounts WHERE role=? LIMIT 1", (role,)) as cur:
-        return await cur.fetchone() is None
-
-
 async def any_accounts(conn) -> bool:
     async with conn.execute("SELECT 1 FROM accounts LIMIT 1") as cur:
         return await cur.fetchone() is not None
@@ -137,6 +136,12 @@ async def account_by_id(conn, account_id_: str) -> dict[str, Any] | None:
     ) as cur:
         row = await cur.fetchone()
     return dict(row) if row else None
+
+
+async def ensure_admin(conn) -> None:
+    """Create the single administrator when that username is still unused."""
+    if await account_by_username(conn, ADMIN_USERNAME) is None:
+        await insert_account(conn, username=ADMIN_USERNAME, password=ADMIN_PASSWORD, role="admin")
 
 
 async def insert_account(conn, *, username: str, password: str, role: str) -> dict[str, Any]:
