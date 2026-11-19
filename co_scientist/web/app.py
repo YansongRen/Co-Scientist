@@ -18,12 +18,14 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import quote
 
 import aiosqlite
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import ValidationError
 from sse_starlette.sse import EventSourceResponse
 
 from .. import ids
@@ -40,11 +42,12 @@ from ..storage.repos import hypotheses as hyp_repo
 from ..storage.repos import reviews as rev_repo
 from ..storage.repos import sessions as sess_repo
 from ..storage.repos import transcripts as tx_repo
+from .access import is_open_path, unauthenticated_response
 from .admin_providers import admin_flash, create_admin_providers_router
 from .auth import (
-    COOKIE, MAX_AGE, account_by_username, current_account, insert_account,
-    ADMIN_USERNAME, ensure_admin, list_accounts, sign_account, validate_password,
-    validate_username, verify_password,
+    COOKIE, account_by_username, cookie_kwargs, current_account, insert_account,
+    ADMIN_USERNAME, ensure_admin, list_accounts, sign_account, update_account_password,
+    validate_password, validate_username, verify_password, any_accounts,
 )
 from .inputs import InputBodyLimit, create_inputs_router
 from .research_start import LaunchOptions, prepare_research, resume_research, schedule_research
@@ -62,6 +65,11 @@ def create_app(cfg: Config | None = None, *, recover_running: bool = False) -> F
 
     @contextlib.asynccontextmanager
     async def lifespan(_app: FastAPI):
+        conn = await db_mod.connect(cfg)
+        try:
+            await ensure_admin(conn, cfg, create_if_missing=False)
+        finally:
+            await conn.close()
         if recover_running:
             from .research_start import recover_running_research
             await recover_running_research(_app, cfg)
@@ -71,6 +79,21 @@ def create_app(cfg: Config | None = None, *, recover_running: bool = False) -> F
     app.state.cfg = cfg
     app.state.background_runs: dict[str, asyncio.Task] = {}
     app.add_middleware(InputBodyLimit, max_bytes=cfg.uploads.max_group_bytes + 1024 * 1024)
+
+    @app.middleware("http")
+    async def require_workspace_login(request: Request, call_next):
+        if is_open_path(request.url.path):
+            return await call_next(request)
+        conn = await db_mod.connect(cfg)
+        try:
+            if not await any_accounts(conn):
+                return await call_next(request)
+            account = await current_account(request, cfg, conn)
+        finally:
+            await conn.close()
+        if account is None:
+            return unauthenticated_response(request)
+        return await call_next(request)
 
     # Static
     app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
@@ -91,7 +114,7 @@ def create_app(cfg: Config | None = None, *, recover_running: bool = False) -> F
     ):
         conn = await db_mod.connect(cfg)
         try:
-            await ensure_admin(conn)
+            await ensure_admin(conn, cfg)
             try:
                 username = validate_username(username)
                 password = validate_password(password)
@@ -105,10 +128,7 @@ def create_app(cfg: Config | None = None, *, recover_running: bool = False) -> F
         finally:
             await conn.close()
         response = RedirectResponse("/admin" if row["role"] == "admin" else "/", status_code=303)
-        response.set_cookie(
-            COOKIE, sign_account(cfg, row["id"], row["role"]),
-            max_age=MAX_AGE, httponly=True, samesite="lax", path="/",
-        )
+        response.set_cookie(COOKIE, sign_account(cfg, row["id"], row["role"]), **cookie_kwargs(request))
         return response
 
     @app.post("/register", response_class=HTMLResponse)
@@ -119,7 +139,7 @@ def create_app(cfg: Config | None = None, *, recover_running: bool = False) -> F
     ):
         conn = await db_mod.connect(cfg)
         try:
-            await ensure_admin(conn)
+            await ensure_admin(conn, cfg)
             try:
                 username = validate_username(username)
                 password = validate_password(password)
@@ -137,10 +157,7 @@ def create_app(cfg: Config | None = None, *, recover_running: bool = False) -> F
         finally:
             await conn.close()
         response = RedirectResponse("/", status_code=303)
-        response.set_cookie(
-            COOKIE, sign_account(cfg, row["id"], row["role"]),
-            max_age=MAX_AGE, httponly=True, samesite="lax", path="/",
-        )
+        response.set_cookie(COOKIE, sign_account(cfg, row["id"], row["role"]), **cookie_kwargs(request))
         return response
 
     @app.post("/logout")
@@ -190,7 +207,7 @@ def create_app(cfg: Config | None = None, *, recover_running: bool = False) -> F
         goal: str = Form(...),
         preferences: str = Form(""),
         budget_usd: float = Form(cfg.run.budget_usd, gt=0, le=25),
-        budget_tokens: int | None = Form(None, ge=1000, le=10000000),
+        budget_tokens: int | None = Form(None, ge=0, le=10000000),
         upload_group_id: str = Form(""),
         concurrency: int = Form(1, ge=1, le=4),
         n_initial: int = Form(2, ge=1, le=20),
@@ -346,10 +363,42 @@ def create_app(cfg: Config | None = None, *, recover_running: bool = False) -> F
 
         return EventSourceResponse(_stream())
 
+    @app.post("/admin/password")
+    async def change_admin_password(
+        request: Request,
+        current_password: str = Form(""),
+        new_password: str = Form(""),
+        confirm_password: str = Form(""),
+    ):
+        conn = await db_mod.connect(cfg)
+        try:
+            account = await current_account(request, cfg, conn)
+            if account is None:
+                return RedirectResponse("/login", status_code=303)
+            if account["role"] != "admin":
+                return RedirectResponse("/admin", status_code=303)
+            row = await account_by_username(conn, account["username"])
+            try:
+                current_password = validate_password(current_password)
+                new_password = validate_password(new_password)
+            except ValueError as exc:
+                return RedirectResponse(f"/admin?error={quote(str(exc), safe='')}", status_code=303)
+            if row is None or not verify_password(current_password, row["password_hash"]):
+                return RedirectResponse(f"/admin?error={quote('当前密码不正确', safe='')}", status_code=303)
+            if new_password != confirm_password:
+                return RedirectResponse(f"/admin?error={quote('两次输入的新密码不一致', safe='')}", status_code=303)
+            await update_account_password(conn, account["username"], new_password)
+        finally:
+            await conn.close()
+        return RedirectResponse("/admin?saved=password", status_code=303)
+
     @app.post("/api/sessions/{session_id}/pause")
     async def api_pause(session_id: str) -> JSONResponse:
         conn = await db_mod.connect(cfg)
         try:
+            session = await sess_repo.fetch(conn, session_id)
+            if session is None:
+                raise HTTPException(status_code=404)
             await sess_repo.set_status(conn, session_id, "paused")
             await GLOBAL_BUS.publish(session_id, "session_paused", {})
             return JSONResponse({"ok": True})
@@ -363,8 +412,11 @@ def create_app(cfg: Config | None = None, *, recover_running: bool = False) -> F
             session = await sess_repo.fetch(conn, session_id)
             if session is None:
                 raise HTTPException(status_code=404)
-            await sess_repo.set_status(conn, session_id, "running")
-            session = await sess_repo.fetch(conn, session_id)
+            if session.status not in ("paused", "running"):
+                raise HTTPException(status_code=409, detail=f"会话状态是 {session.status}，不能恢复")
+            if session.status != "running":
+                await sess_repo.set_status(conn, session_id, "running")
+                session = await sess_repo.fetch(conn, session_id)
             started = resume_research(request.app, cfg, session)
             await GLOBAL_BUS.publish(session_id, "session_resumed", {})
             return JSONResponse({"ok": True, "supervisor": "started" if started else "already_running"})
@@ -375,6 +427,9 @@ def create_app(cfg: Config | None = None, *, recover_running: bool = False) -> F
     async def api_abort(session_id: str) -> JSONResponse:
         conn = await db_mod.connect(cfg)
         try:
+            session = await sess_repo.fetch(conn, session_id)
+            if session is None:
+                raise HTTPException(status_code=404)
             await sess_repo.set_status(conn, session_id, "aborted")
             await GLOBAL_BUS.publish(session_id, "session_aborted", {})
             return JSONResponse({"ok": True})
@@ -390,12 +445,24 @@ def create_app(cfg: Config | None = None, *, recover_running: bool = False) -> F
     ) -> JSONResponse:
         conn = await db_mod.connect(cfg)
         try:
-            fb = SystemFeedback(
-                id=ids.feedback_id(), session_id=session_id,
-                created_at=datetime.now(UTC),
-                source="human", kind=kind,
-                target_id=target_id or None, text=text, active=True,
-            )
+            session = await sess_repo.fetch(conn, session_id)
+            if session is None:
+                raise HTTPException(status_code=404, detail="session not found")
+            if kind in ("pin", "rejection"):
+                if not target_id:
+                    raise HTTPException(status_code=422, detail="pin 和 rejection 需要 target_id")
+                hypothesis = await hyp_repo.fetch(conn, target_id)
+                if hypothesis is None or hypothesis.session_id != session_id:
+                    raise HTTPException(status_code=404, detail="hypothesis not found")
+            try:
+                fb = SystemFeedback(
+                    id=ids.feedback_id(), session_id=session_id,
+                    created_at=datetime.now(UTC),
+                    source="human", kind=kind,
+                    target_id=target_id or None, text=text, active=True,
+                )
+            except ValidationError as exc:
+                raise HTTPException(status_code=422, detail="反馈类型无效") from exc
             await fb_repo.insert(conn, fb)
             if kind == "pin" and target_id:
                 await hyp_repo.set_state(conn, target_id, "pinned")
@@ -444,7 +511,7 @@ async def _login_page(cfg: Config, request: Request, *, conn=None, error: str = 
     if own:
         conn = await db_mod.connect(cfg)
     try:
-        await ensure_admin(conn)
+        await ensure_admin(conn, cfg)
         return {
             "account": await current_account(request, cfg, conn),
             "error": error,

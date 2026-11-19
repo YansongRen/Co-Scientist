@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import os
 import re
 import secrets
 from datetime import UTC, datetime, timedelta
@@ -16,7 +17,11 @@ from fastapi import Request
 
 from ..config import Config
 from ..ids import account_id
+from ..logging import get_logger
 from ..storage import db as db_mod
+from .access import request_is_secure
+
+log = get_logger("web.auth")
 
 COOKIE = "co_scientist_account"
 MAX_AGE = 14 * 24 * 60 * 60
@@ -47,7 +52,18 @@ def validate_username(value: str) -> str:
 
 
 ADMIN_USERNAME = "rys"
-ADMIN_PASSWORD = "123456"
+ADMIN_BOOTSTRAP_FILE = "admin-bootstrap.txt"
+_LEAKED_ADMIN_PASSWORDS = ("123456",)
+
+
+def cookie_kwargs(request: Request) -> dict[str, Any]:
+    return {
+        "max_age": MAX_AGE,
+        "httponly": True,
+        "samesite": "lax",
+        "path": "/",
+        "secure": request_is_secure(request),
+    }
 
 
 def validate_password(value: str) -> str:
@@ -138,10 +154,48 @@ async def account_by_id(conn, account_id_: str) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
-async def ensure_admin(conn) -> None:
-    """Create the single administrator when that username is still unused."""
-    if await account_by_username(conn, ADMIN_USERNAME) is None:
-        await insert_account(conn, username=ADMIN_USERNAME, password=ADMIN_PASSWORD, role="admin")
+def bootstrap_admin_password(cfg: Config) -> str:
+    """Password from env, otherwise a generated one written next to the database."""
+    env = os.environ.get("CO_SCIENTIST_ADMIN_PASSWORD", "").strip()
+    if env:
+        return validate_password(env)
+    password = secrets.token_urlsafe(12)
+    path = cfg.data_dir / ADMIN_BOOTSTRAP_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{ADMIN_USERNAME}\n{password}\n", encoding="utf-8")
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+    log.warning("admin_password_written", path=str(path))
+    return password
+
+
+async def update_account_password(conn, username: str, password: str) -> None:
+    await conn.execute(
+        "UPDATE accounts SET password_hash=? WHERE username=?",
+        (hash_password(password), username),
+    )
+    await conn.commit()
+
+
+async def ensure_admin(conn, cfg: Config, *, create_if_missing: bool = True) -> None:
+    """Create or rotate the administrator. Never seeds a password from source."""
+    row = await account_by_username(conn, ADMIN_USERNAME)
+    reset = os.environ.get("CO_SCIENTIST_ADMIN_PASSWORD_RESET", "").strip() == "1"
+    leaked = bool(
+        row is not None
+        and any(verify_password(item, row["password_hash"]) for item in _LEAKED_ADMIN_PASSWORDS)
+    )
+    if row is None:
+        if not create_if_missing:
+            return
+        await insert_account(
+            conn, username=ADMIN_USERNAME, password=bootstrap_admin_password(cfg), role="admin",
+        )
+        return
+    if reset or leaked:
+        await update_account_password(conn, ADMIN_USERNAME, bootstrap_admin_password(cfg))
 
 
 async def insert_account(conn, *, username: str, password: str, role: str) -> dict[str, Any]:

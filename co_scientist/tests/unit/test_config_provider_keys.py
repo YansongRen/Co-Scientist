@@ -121,11 +121,21 @@ def test_together_expects_a_prefix_too() -> None:
     assert check_models(cfg) == []
 
 
-def test_openai_compatible_has_no_convention_to_check() -> None:
-    """It points at whatever `[llm.openai] base_url` says, so stay quiet."""
+def test_openai_compatible_accepts_bare_ids() -> None:
+    """Bare vendor ids are fine; OpenRouter-style leftovers are not."""
     from co_scientist.llm.provider import check_models
 
     cfg = Config()
     cfg.llm.provider = "openai_compatible"
-    cfg.models.generation = "some-local-gguf"
+    for field in vars(cfg.models):
+        setattr(cfg.models, field, "deepseek-chat")
     assert check_models(cfg) == []
+
+
+def test_openai_compatible_flags_openrouter_ids() -> None:
+    from co_scientist.llm.provider import check_models
+
+    cfg = Config()
+    cfg.llm.provider = "openai_compatible"
+    problems = check_models(cfg)
+    assert any("classifier" in item and "anthropic/" in item for item in problems)

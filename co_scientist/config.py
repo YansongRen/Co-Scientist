@@ -31,7 +31,7 @@ class RunCfg(BaseModel):
     max_ideas: int = 60
     max_matches_per_idea: int = 12
     wall_clock_seconds: int = 7200
-    budget_tokens: int = 5_000_000
+    budget_tokens: int = 0
     budget_usd: float = 25.0
 
 
@@ -473,8 +473,8 @@ class LiteratureCfg(BaseModel):
 
     enabled: bool = True
     exclusive: bool = True
-    max_papers: int = Field(4, ge=1, le=8)
-    max_iters: int = Field(8, ge=2, le=16)
+    max_papers: int = Field(2, ge=1, le=8)
+    max_iters: int = Field(4, ge=2, le=16)
 
 
 class UploadsCfg(BaseModel):

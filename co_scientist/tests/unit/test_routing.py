@@ -158,3 +158,11 @@ def test_degrade_still_respects_never_degrade_modes() -> None:
     cfg.models.reflection = "opus"
     r = route(cfg, "reflection", "verification", degraded=True)
     assert r.model == "opus"
+
+
+def test_openai_compatible_classifier_falls_back_to_parse_goal() -> None:
+    cfg = Config()
+    cfg.llm.provider = "openai_compatible"
+    cfg.models.parse_goal = "deepseek-chat"
+    cfg.models.classifier = "anthropic/claude-haiku-4.5"
+    assert route(cfg, "classifier").model == "deepseek-chat"

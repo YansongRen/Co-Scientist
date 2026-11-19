@@ -17,6 +17,7 @@ from ..ops_providers import (
     upsert_endpoint,
 )
 from ..storage import db as db_mod
+from .access import secrets_transport_allowed
 from .auth import current_account
 
 SAVED_MESSAGES = {
@@ -24,7 +25,10 @@ SAVED_MESSAGES = {
     "session": "会话模型和作者已保存。",
     "endpoint": "生成端点已保存。",
     "deleted": "已删除这个生成端点。",
+    "password": "管理员密码已更新。",
 }
+
+INSECURE_SECRETS = "密钥只能在 HTTPS 或本机回环地址上保存"
 
 
 def admin_flash(request: Request) -> dict[str, str | None]:
@@ -47,6 +51,7 @@ def create_admin_providers_router(cfg: Config) -> APIRouter:
     @router.put("/api/admin/providers/keys")
     async def put_key(request: Request):
         await _require_admin(request, cfg)
+        _require_secret_transport(request)
         body = await _json_object(request)
         try:
             set_api_key(cfg, str(body.get("name") or ""), str(body.get("value") or ""))
@@ -74,6 +79,9 @@ def create_admin_providers_router(cfg: Config) -> APIRouter:
     async def put_endpoint(request: Request):
         await _require_admin(request, cfg)
         body = await _json_object(request)
+        api_key = body.get("api_key")
+        if api_key:
+            _require_secret_transport(request)
         try:
             upsert_endpoint(
                 cfg,
@@ -82,7 +90,7 @@ def create_admin_providers_router(cfg: Config) -> APIRouter:
                 model=str(body.get("model") or ""),
                 api_key_env=str(body.get("api_key_env") or ""),
                 max_concurrent=body.get("max_concurrent", 1),
-                api_key=body.get("api_key"),
+                api_key=api_key,
             )
         except OpsError as exc:
             raise HTTPException(422, str(exc)) from exc
@@ -101,6 +109,8 @@ def create_admin_providers_router(cfg: Config) -> APIRouter:
     async def form_key(request: Request, name: str = Form(""), value: str = Form("")):
         if error := await _form_admin_error(request, cfg):
             return error
+        if not secrets_transport_allowed(request):
+            return _redirect(error=INSECURE_SECRETS)
         try:
             set_api_key(cfg, name, value)
         except OpsError as exc:
@@ -138,6 +148,8 @@ def create_admin_providers_router(cfg: Config) -> APIRouter:
     ):
         if error := await _form_admin_error(request, cfg):
             return error
+        if api_key and not secrets_transport_allowed(request):
+            return _redirect(error=INSECURE_SECRETS)
         try:
             upsert_endpoint(
                 cfg,
@@ -163,6 +175,11 @@ def create_admin_providers_router(cfg: Config) -> APIRouter:
         return _redirect(saved="deleted")
 
     return router
+
+
+def _require_secret_transport(request: Request) -> None:
+    if not secrets_transport_allowed(request):
+        raise HTTPException(403, INSECURE_SECRETS)
 
 
 async def _require_admin(request: Request, cfg: Config) -> dict[str, str]:

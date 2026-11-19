@@ -194,6 +194,15 @@ async def load_shared_literature(cfg, session_id: str) -> dict | None:
     return record if isinstance(record, dict) else None
 
 
+def _remaining_seconds(session) -> float | None:
+    deadline = getattr(session, "wall_deadline", None)
+    if deadline is None:
+        return None
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=UTC)
+    return (deadline - datetime.now(UTC)).total_seconds()
+
+
 async def gather_shared_literature(deps: AgentDeps, session) -> dict | None:
     """Search and read once on the session model. Never raises into startup."""
     if not deps.cfg.literature.enabled:
@@ -201,6 +210,11 @@ async def gather_shared_literature(deps: AgentDeps, session) -> dict | None:
     existing = await load_shared_literature(deps.cfg, session.id)
     if existing:
         return existing
+    remaining = _remaining_seconds(session)
+    if remaining is not None and remaining < 90:
+        record = _empty(deps, error_type="wall_clock")
+        await _save(deps, session, record)
+        return record
     try:
         record = await _gather(deps, session)
     except Exception as exc:
@@ -231,8 +245,7 @@ async def _gather(deps: AgentDeps, session) -> dict:
     limit = deps.cfg.literature.max_papers
     prompt = (
         "You are the only literature agent for this research. Search PubMed, Europe PMC, "
-        "arXiv, and web_search when that tool is available, then call read_paper on each "
-        "paper you will keep. "
+        "and arXiv, then call read_paper on each paper you will keep. Do not use web_search. "
         f"Keep at most {limit} papers and only a handful of queries. "
         f"Write each note in {SKILL_NAME} {SKILL_VERSION} {SKILL_MODE} mode: research question, "
         "core design, key reported results, evidence gaps, one useful next check, and a reading "
@@ -246,7 +259,7 @@ async def _gather(deps: AgentDeps, session) -> dict:
         tool for tool in deps.tools.anthropic_tools_for("generation")
         if tool["name"] in {
             "pubmed_search", "arxiv_search", "europe_pmc_search",
-            "read_paper", "web_search",
+            "read_paper",
         }
     ]
     spec = AgentCallSpec(
@@ -259,7 +272,7 @@ async def _gather(deps: AgentDeps, session) -> dict:
         user_blocks=[CachedBlock(prompt, cache=False)],
         tools=[*search_tools, RECORD_SHARED_LITERATURE],
         tool_choice={"type": "auto"},
-        max_output_tokens=4096,
+        max_output_tokens=2048,
     )
     ctx = CallContext(
         session_id=session.id, task_id=None, agent="supervisor",

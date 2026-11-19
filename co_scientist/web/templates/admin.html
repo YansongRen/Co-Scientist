@@ -34,6 +34,22 @@
       <li><strong>{{ row.username }}</strong><span>{{ row.role_label }}</span><time>{{ row.created_at[:16] }}</time></li>
       {% endfor %}
     </ul>
+    <div class="login-card admin-card">
+      <small>口令</small>
+      <h2>更换管理员密码</h2>
+      <form method="post" action="/admin/password" autocomplete="off">
+        <label>当前密码
+          <input name="current_password" type="password" required autocomplete="current-password">
+        </label>
+        <label>新密码
+          <input name="new_password" type="password" required minlength="6" maxlength="128" autocomplete="new-password">
+        </label>
+        <label>确认新密码
+          <input name="confirm_password" type="password" required minlength="6" maxlength="128" autocomplete="new-password">
+        </label>
+        <button class="primary-button" type="submit">更新密码</button>
+      </form>
+    </div>
 
     <section class="admin-section" id="providers">
       <h2 class="login-list-title">API 管理</h2>
@@ -44,7 +60,7 @@
       <div class="login-card admin-card">
         <small>密钥</small>
         <h2>更换或新增 API Key</h2>
-        <p>只保存你在这里提交的钥匙，不会把本机 `.env` 整份拷进数据目录。页面只显示是否已配置和末尾几位。</p>
+        <p>只保存 Secrets 字段或 <code>*_API_KEY</code>。不要在明文 HTTP 上提交密钥。页面只显示是否已配置和末尾几位。</p>
         <ul class="admin-key-list">
           {% for key in providers.api_keys %}
           <li><code>{{ key.name }}</code><span>{% if key.configured %}已配置 {{ key.preview }}{% else %}未配置{% endif %}</span></li>
@@ -100,7 +116,7 @@
       <div class="login-card admin-card">
         <small>生成端点</small>
         <h2>新增或修改命名模型</h2>
-        <p>端点名出现在作者列表里时，生成阶段会走这个 OpenAI 兼容接口。并发默认 1；0 表示不限制。</p>
+        <p>端点名出现在作者列表里时，生成阶段会走这个 OpenAI 兼容接口。每条端点使用独立的 <code>ENDPOINT_名字_API_KEY</code>，不能借用会话密钥。更改接口地址时必须同时填新密钥。并发默认 1；0 表示不限制。</p>
         {% if providers.endpoints %}
         <ul class="admin-endpoint-list">
           {% for endpoint in providers.endpoints %}
@@ -129,9 +145,6 @@
             </label>
             <label>接口地址
               <input name="base_url" required placeholder="https://api.moonshot.cn/v1">
-            </label>
-            <label>密钥环境变量
-              <input name="api_key_env" required placeholder="KIMI_API_KEY">
             </label>
             <label>最大并发
               <input name="max_concurrent" type="number" min="0" max="32" value="1">

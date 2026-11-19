@@ -21,6 +21,7 @@ from .llm.provider import KNOWN_PROVIDERS, reset_endpoint_gates
 RUNTIME_TOML = "runtime.toml"
 RUNTIME_ENV = "runtime.env"
 _ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+_API_KEY_NAME = re.compile(r"^[A-Z][A-Z0-9_]{0,48}_API_KEY$")
 _ENDPOINT_NAME = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 MODEL_FIELDS = tuple(ModelsCfg.model_fields)
 KNOWN_KEY_NAMES = tuple(Secrets.model_fields)
@@ -134,11 +135,14 @@ def apply_ops_overlay(cfg: Config) -> Config:
             authors = generation.get("authors") or []
             cfg.generation.authors = [str(item) for item in authors]
     apply_runtime_env(cfg)
+    _rebind_endpoint_key_names(cfg)
     return cfg
 
 
 def apply_runtime_env(cfg: Config) -> None:
     for name, value in _parse_env_file(runtime_env_path(cfg)).items():
+        if not allowed_secret_name(name):
+            continue
         os.environ[name] = value
         if name in Secrets.model_fields:
             setattr(cfg.secrets, name, value)
@@ -175,7 +179,7 @@ def persist_runtime_toml(cfg: Config) -> None:
 
 
 def set_api_key(cfg: Config, name: str, value: str) -> None:
-    name = validate_env_name(name)
+    name = validate_secret_name(name)
     value = value.strip()
     if any(ord(char) < 32 for char in value):
         raise OpsError("密钥不能包含换行或控制字符")
@@ -218,28 +222,37 @@ def update_session(
     persist_runtime_toml(cfg)
 
 
+def endpoint_key_env(name: str) -> str:
+    return f"ENDPOINT_{name.upper()}_API_KEY"
+
+
 def upsert_endpoint(
     cfg: Config,
     *,
     name: str,
     base_url: str,
     model: str,
-    api_key_env: str,
+    api_key_env: str = "",
     max_concurrent: int | str = 1,
     api_key: str | None = None,
 ) -> None:
     name = validate_endpoint_name(name)
+    url = validate_url(base_url)
+    existing = cfg.llm.endpoints.get(name)
+    supplied_key = str(api_key or "").strip()
+    if existing is not None and existing.base_url.rstrip("/") != url.rstrip("/") and not supplied_key:
+        raise OpsError("更改接口地址时必须同时填写新的 API Key，避免把已有密钥发到新地址")
     endpoint = EndpointCfg(
-        base_url=validate_url(base_url),
+        base_url=url,
         model=validate_model_id(model),
-        api_key_env=validate_env_name(api_key_env),
+        api_key_env=endpoint_key_env(name),
         max_concurrent=validate_concurrency(max_concurrent),
     )
     cfg.llm.endpoints[name] = endpoint
     persist_runtime_toml(cfg)
     reset_endpoint_gates()
-    if api_key is not None and str(api_key).strip():
-        set_api_key(cfg, endpoint.api_key_env, str(api_key))
+    if supplied_key:
+        set_api_key(cfg, endpoint.api_key_env, supplied_key)
 
 
 def delete_endpoint(cfg: Config, name: str) -> None:
@@ -253,10 +266,23 @@ def delete_endpoint(cfg: Config, name: str) -> None:
     reset_endpoint_gates()
 
 
+def allowed_secret_name(name: str) -> bool:
+    if name in Secrets.model_fields:
+        return True
+    return _API_KEY_NAME.fullmatch(name) is not None
+
+
 def validate_env_name(name: str) -> str:
     name = name.strip()
     if _ENV_NAME.fullmatch(name) is None:
         raise OpsError("环境变量名需要大写字母开头，只能包含大写字母、数字和下划线")
+    return name
+
+
+def validate_secret_name(name: str) -> str:
+    name = validate_env_name(name)
+    if not allowed_secret_name(name):
+        raise OpsError("只能保存 Secrets 里已有的字段，或形如 *_API_KEY 的变量名")
     return name
 
 
@@ -328,8 +354,13 @@ def validate_authors(raw: list[str] | str, endpoints: dict[str, EndpointCfg]) ->
 
 def persist_runtime_env(cfg: Config, updates: dict[str, str]) -> None:
     path = runtime_env_path(cfg)
-    current = _parse_env_file(path)
+    current = {
+        name: value for name, value in _parse_env_file(path).items()
+        if allowed_secret_name(name)
+    }
     for name, value in updates.items():
+        if not allowed_secret_name(name):
+            continue
         if value:
             current[name] = value
         else:
@@ -342,6 +373,19 @@ def persist_runtime_env(cfg: Config, updates: dict[str, str]) -> None:
         path.chmod(0o600)
     except OSError:
         pass
+
+
+def _rebind_endpoint_key_names(cfg: Config) -> None:
+    rebound: dict[str, EndpointCfg] = {}
+    for name, endpoint in cfg.llm.endpoints.items():
+        forced = endpoint_key_env(name)
+        if endpoint.api_key_env != forced:
+            value = secret_value(cfg, endpoint.api_key_env)
+            if value and not os.environ.get(forced):
+                os.environ[forced] = value
+            endpoint = endpoint.model_copy(update={"api_key_env": forced})
+        rebound[name] = endpoint
+    cfg.llm.endpoints = rebound
 
 
 def _toml_str(value: str) -> str:

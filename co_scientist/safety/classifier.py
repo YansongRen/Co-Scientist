@@ -5,8 +5,8 @@ A small Haiku-backed classifier with a structured-output tool. Placement:
 - hypothesis-save time (mandatory): ok / quarantine / block
 - final-report time (optional): ok / redact_quarantined / block_publish
 
-Defensive use only. When the backend is unavailable we return `ok` and log a
-warning rather than crashing the session — agents stay functional in dev.
+Defensive use only. When the backend is unavailable we mark the result as
+`unavailable` and treat it as quarantine for hypotheses, rather than fail-open.
 """
 
 from __future__ import annotations
@@ -51,16 +51,26 @@ _SYSTEM_PROMPT = (
 
 
 class ClassifierResult:
-    def __init__(self, categories: list[str], confidence: float, rationale: str) -> None:
+    def __init__(
+        self,
+        categories: list[str],
+        confidence: float,
+        rationale: str,
+        *,
+        unavailable: bool = False,
+    ) -> None:
         self.categories = categories or ["none"]
         self.confidence = confidence
         self.rationale = rationale
+        self.unavailable = unavailable
 
     @property
     def is_benign(self) -> bool:
         return self.categories == ["none"] or ("none" in self.categories and len(self.categories) == 1)
 
     def action(self, cfg: Config) -> Action:
+        if self.unavailable:
+            return "quarantine"
         if self.is_benign:
             return "allow"
         block = set(cfg.safety.classifier_block_categories)
@@ -117,7 +127,7 @@ class SafetyClassifier:
         session_id: str = "safety",
         task_id: str | None = None,
     ) -> ClassifierResult:
-        """Always returns a result; degrades to benign + warning log on failure.
+        """Always returns a result; backend failures are unavailable, not allow.
 
         Pass the session provider as `llm` so the call shares that session's
         budget and transcripts. API backends put the tool payload on
@@ -133,8 +143,10 @@ class SafetyClassifier:
 
         provider = llm if llm is not None else self._get_provider()
         if provider is None:
-            return ClassifierResult(categories=["none"], confidence=0.0,
-                                    rationale="classifier backend unavailable")
+            return ClassifierResult(
+                categories=["none"], confidence=0.0,
+                rationale="classifier backend unavailable", unavailable=True,
+            )
 
         from ..llm.routing import route
         from ..llm.types import AgentCallSpec, CachedBlock, CallContext
@@ -157,13 +169,17 @@ class SafetyClassifier:
             resp = await provider.call(spec, ctx)
         except Exception as e:
             log.warning("classifier_call_failed", err=str(e))
-            return ClassifierResult(categories=["none"], confidence=0.0,
-                                    rationale=f"classifier_error: {e!s}")
+            return ClassifierResult(
+                categories=["none"], confidence=0.0,
+                rationale=f"classifier_error: {e!s}", unavailable=True,
+            )
 
         payload = _assessment_payload(resp)
         if payload is None:
-            return ClassifierResult(categories=["none"], confidence=0.0,
-                                    rationale="no safety assessment recorded")
+            return ClassifierResult(
+                categories=["none"], confidence=0.0,
+                rationale="no safety assessment recorded", unavailable=True,
+            )
         return ClassifierResult(
             categories=list(payload.get("categories", ["none"])),
             confidence=float(payload.get("confidence", 0.0)),

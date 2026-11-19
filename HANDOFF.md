@@ -292,3 +292,18 @@ Ranking 优先比较同一相似簇、嵌入更近的假设。至少两种策略
 验证：`OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 .venv/bin/python -m pytest -q co_scientist/tests/unit` 为 **581 passed in 25.21s**。`pip check` 和 `git diff --check` 通过。隔离预览 `http://127.0.0.1:7888` 用管理员 `rys` 登录后，能保存一把测试检索密钥（页面显示 `sk…cdef`，不回显全文），并新增生成端点 `demo` / `demo-flash`。预览已停，测试密钥只写在系统临时目录，没有写入正式 `data/`。2026-11-19 14:28 已重启本机正式服务 `http://127.0.0.1:7879`，该进程会加载管理员 API 管理页；在这个地址新建研究会调用真实模型。
 
 未做：公网登录保护与 HTTPS、在足够预算下重跑固定目标、分类器的真实模型效果。已在运行的 Supervisor 不会热切换新钥匙。
+
+## 登录保护、密钥白名单、分类器与 Token 上限（2026-11-19）
+
+维护者复测后要求修六项，并取消研究 Token 上限。没有调用真实模型，没有改正式 `data/`，没有部署。
+
+- **有账号后必须登录才能碰研究。** `/classic`、`/sessions/new`、`/api/studio/sessions`、暂停/恢复/中止/反馈在库里已有账号时，未登录 HTML 回登录页，API 返回 401。库为空时仍可离线试用。`POST /api/sessions/{id}/resume` 只接受 `paused`/`running`；已结束的会话返回 409，不会再启动调度。反馈在会话不存在时返回 404；pin/reject 的假设必须属于该会话。
+- **管理员口令不再写在源码里。** 启动时如果现有 `rys` 仍是已公开的 `123456`，会改成 `CO_SCIENTIST_ADMIN_PASSWORD`，或写入 `data_dir/admin-bootstrap.txt`（权限 600）的随机口令。`CO_SCIENTIST_ADMIN_PASSWORD_RESET=1` 可强制重置。管理员页可以改自己的密码。Cookie 在 HTTPS 下带 `Secure`。
+- **密钥不能走公网明文 HTTP，也不能借别人的环境变量。** 保存 API Key 只允许 HTTPS、本机回环或测试主机。命名端点固定使用 `ENDPOINT_名字_API_KEY`；改 `base_url` 必须同时给新钥匙。`set_api_key` 只接受 Secrets 字段或 `*_API_KEY`。已写入 `runtime.env` 的 `LD_PRELOAD`/`PATH` 等不会再进入 `os.environ`，下次合法保存会从文件里删掉。
+- **`serve` 默认不接回历史 running 会话。** 需要显式 `--recover-running`。systemd 模板不加这个开关。
+- **分类器失败不再放行假设。** `openai_compatible` 下 `anthropic/...` 这类 OpenRouter 名会告警，分类路由改用 `parse_goal` 的模型。分类调用失败或没写出评估时，假设按 `quarantine` 处理，而不是当 benign。
+- **共享文献更短，研究默认不限额 Token。** `max_papers=2`、`max_iters=4`，共享阅读不再带 `web_search`，输出上限 2048；剩余墙钟不足 90 秒则跳过这次阅读并回退各作者检索。`budget_tokens=0` 表示不限额；网页表单默认 0。协议打分仍用 100000，那是评测预算，不是产品默认。
+
+验证：`OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 .venv/bin/python -m pytest -q co_scientist/tests/unit` 为 **594 passed in 34.64s**。`pip check`、`git diff --check` 和 `node --check co_scientist/web/static/studio.js` 通过。没有调用真实模型，没有改正式 `data/`。
+
+线上若仍是 `rys / 123456`，部署此版本后第一次启动会轮换口令，需要读 `data_dir/admin-bootstrap.txt` 或事先设置 `CO_SCIENTIST_ADMIN_PASSWORD`。分类器要在 `deployment.toml` 里写成当前 Provider 自己的模型名；只靠回退不够，仍应改配置。完整公网 TLS/Nginx 仍由维护者部署。本机 `http://127.0.0.1:7879` 的 serve 还是旧进程，需要维护者重启后才会带上这些改动。

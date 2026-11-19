@@ -23,7 +23,7 @@
   function applyLaunchDefaults(){
     let saved={};try{saved=JSON.parse(localStorage.getItem('co-scientist-launch-limits')||'{}');}catch(_){/* Optional preferences. */}
     saved={...saved,...(state.launchOptions||{})};
-    const values={budget_usd:defaults.budget,budget_tokens:defaults.budget_tokens||500000,wall_clock_seconds:defaults.wall_clock,n_initial:2,concurrency:1,research_mode:'lightweight',...saved};
+    const values={budget_usd:defaults.budget,budget_tokens:defaults.budget_tokens ?? 0,wall_clock_seconds:defaults.wall_clock,n_initial:2,concurrency:1,research_mode:'lightweight',...saved};
     Object.entries(values).forEach(([key,value])=>{if($('#launch-form').elements[key])$('#launch-form').elements[key].value=value;});
   }
   function rememberLaunch(){

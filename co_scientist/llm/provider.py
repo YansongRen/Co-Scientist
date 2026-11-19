@@ -424,6 +424,23 @@ _EXPECTS_VENDOR_PREFIX: dict[str, bool | None] = {
     "claude_cli": False,
     "codex_cli": False,
 }
+_OPENROUTERISH_PREFIXES = (
+    "anthropic/", "google/", "openai/", "meta-llama/", "mistralai/", "qwen/",
+)
+
+
+def _openai_compatible_family_problems(cfg) -> list[str]:
+    problems: list[str] = []
+    for field, model in vars(cfg.models).items():
+        if not isinstance(model, str) or not model:
+            continue
+        lowered = model.lower()
+        if any(lowered.startswith(prefix) for prefix in _OPENROUTERISH_PREFIXES):
+            problems.append(
+                f"models.{field} = {model!r} looks like an OpenRouter id; "
+                f"'openai_compatible' needs the vendor's own model name"
+            )
+    return problems
 
 
 def check_models(cfg) -> list[str]:
@@ -438,7 +455,7 @@ def check_models(cfg) -> list[str]:
         name = DEFAULT_PROVIDER
     expects_prefix = _EXPECTS_VENDOR_PREFIX.get(name)
     if expects_prefix is None:
-        return []
+        return _openai_compatible_family_problems(cfg)
 
     problems: list[str] = []
     for field, model in vars(cfg.models).items():

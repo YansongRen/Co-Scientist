@@ -9,11 +9,10 @@ concurrency = 4
 max_ideas = 60
 max_matches_per_idea = 12
 wall_clock_seconds = 7200            # 2h default
-budget_tokens = 5_000_000
+budget_tokens = 0                   # 0 = no token cap; wall_clock_seconds and max_ideas still apply
 # Not a spend gate: a subscription has no marginal per-call price. The CLI
-# reports an equivalent API cost per call and this caps that gauge, which is
-# still useful for spotting a runaway session. Real limits are
-# wall_clock_seconds and max_ideas.
+# reports an equivalent API cost per call and this caps that gauge when set
+# above zero. Real limits are wall_clock_seconds and max_ideas.
 budget_usd = 25.0
 
 [storage]
@@ -41,8 +40,8 @@ dim = 1024
 [literature]
 enabled = true
 exclusive = true
-max_papers = 4
-max_iters = 8
+max_papers = 2
+max_iters = 4
 
 # Deterministic round-robin; repeating a strategy provides integer weights.
 [generation]

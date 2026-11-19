@@ -86,8 +86,22 @@ async def test_classify_reads_cli_capture_when_raw_has_no_tool() -> None:
 
 
 @pytest.mark.asyncio
-async def test_classify_fail_open_without_assessment() -> None:
+async def test_classify_unavailable_without_assessment() -> None:
     cfg = Config(safety=SafetyCfg(enable_classifier=True))
     result = await SafetyClassifier(cfg).classify("benign", llm=_StubLLM(_response()))
-    assert result.action(cfg) == "allow"
+    assert result.unavailable
+    assert result.action(cfg) == "quarantine"
     assert "no safety assessment" in result.rationale
+
+
+@pytest.mark.asyncio
+async def test_classify_backend_error_is_unavailable() -> None:
+    cfg = Config(safety=SafetyCfg(enable_classifier=True))
+
+    class _Boom:
+        async def call(self, spec, ctx):
+            raise RuntimeError("404 model_not_found")
+
+    result = await SafetyClassifier(cfg).classify("goal", llm=_Boom())
+    assert result.unavailable
+    assert result.action(cfg) == "quarantine"

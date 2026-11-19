@@ -158,6 +158,39 @@ async def test_web_resume_starts_supervisor_when_none_is_live(tmp_cfg, conn, mon
 
 
 @pytest.mark.asyncio
+async def test_web_resume_rejects_finished_session(tmp_cfg, conn, monkeypatch):
+    session = await _session(conn, sid="rel-done", status="done")
+    monkeypatch.setattr("co_scientist.agents.supervisor.Supervisor.run_session", AsyncMock())
+    app = create_app(tmp_cfg)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(f"/api/sessions/{session.id}/resume")
+        assert response.status_code == 409
+        assert "不能恢复" in response.json()["detail"]
+    saved = await sessions.fetch(conn, session.id)
+    assert saved.status == "done"
+
+
+@pytest.mark.asyncio
+async def test_create_app_does_not_recover_running_by_default(tmp_cfg, conn, monkeypatch):
+    session = await _session(conn, sid="rel-norecover", status="running")
+    seen = []
+
+    async def fake_run(*args, **kwargs):
+        seen.append(kwargs)
+        return session.id
+
+    monkeypatch.setattr("co_scientist.agents.supervisor.Supervisor.run_session", fake_run)
+    app = create_app(tmp_cfg)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        assert (await client.get("/healthz")).status_code == 200
+    assert seen == []
+    saved = await sessions.fetch(conn, session.id)
+    assert saved.status == "running"
+
+
+@pytest.mark.asyncio
 async def test_studio_exposes_termination_without_config_snapshot(tmp_cfg, conn):
     session = await _session(conn, sid="rel-ui", status="done")
     session.config_snapshot["termination"] = {

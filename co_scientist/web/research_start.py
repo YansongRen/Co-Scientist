@@ -21,7 +21,7 @@ log = get_logger("web.research_start")
 
 class LaunchOptions(BaseModel):
     budget_usd: float = Field(1, gt=0, le=25, allow_inf_nan=False)
-    budget_tokens: int | None = Field(None, ge=1000, le=10000000)
+    budget_tokens: int | None = Field(None, ge=0, le=10000000)
     upload_group_id: str | None = Field(None, pattern=r"^inp_[a-f0-9]{32}$")
     concurrency: int = Field(1, ge=1, le=4)
     n_initial: int = Field(2, ge=1, le=20)

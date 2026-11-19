@@ -18,6 +18,7 @@ from co_scientist.ops_providers import (
     update_session,
     upsert_endpoint,
 )
+from co_scientist.tests.conftest import TEST_ADMIN_PASSWORD
 from co_scientist.web.app import create_app
 
 SECRET = "sk-admin-test-secret-value-12345"
@@ -40,7 +41,7 @@ async def test_only_admin_can_read_or_change_providers(tmp_cfg, monkeypatch):
         assert "API 管理" not in page.text and SECRET not in page.text
 
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as admin:
-        login = await admin.post("/login", data={"username": "rys", "password": "123456"})
+        login = await admin.post("/login", data={"username": "rys", "password": TEST_ADMIN_PASSWORD})
         assert login.status_code == 303
         page = await admin.get("/admin")
         assert page.status_code == 200
@@ -69,10 +70,11 @@ async def test_only_admin_can_read_or_change_providers(tmp_cfg, monkeypatch):
 async def test_admin_can_add_model_endpoint_and_reload_overlay(tmp_cfg, monkeypatch):
     monkeypatch.delenv("KIMI_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ENDPOINT_KIMI_API_KEY", raising=False)
     tmp_cfg.llm.provider = "openai_compatible"
     transport = httpx.ASGITransport(app=create_app(tmp_cfg))
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as admin:
-        await admin.post("/login", data={"username": "rys", "password": "123456"})
+        await admin.post("/login", data={"username": "rys", "password": TEST_ADMIN_PASSWORD})
         created = await admin.put("/api/admin/providers/endpoints", json={
             "name": "kimi",
             "base_url": "https://api.moonshot.cn/v1",
@@ -83,6 +85,7 @@ async def test_admin_can_add_model_endpoint_and_reload_overlay(tmp_cfg, monkeypa
         })
         assert created.status_code == 200
         assert created.json()["endpoints"][0]["name"] == "kimi"
+        assert created.json()["endpoints"][0]["api_key_env"] == "ENDPOINT_KIMI_API_KEY"
         assert SECRET not in created.text
         session = await admin.put("/api/admin/providers/session", json={
             "provider": "openai_compatible",
@@ -104,7 +107,8 @@ async def test_admin_can_add_model_endpoint_and_reload_overlay(tmp_cfg, monkeypa
     env_text = runtime_env_path(tmp_cfg).read_text(encoding="utf-8")
     assert SECRET not in toml_text
     assert "kimi-k3.1-pro" in toml_text
-    assert "KIMI_API_KEY=" + SECRET in env_text
+    assert "ENDPOINT_KIMI_API_KEY=" + SECRET in env_text
+    assert not any(line.startswith("KIMI_API_KEY=") for line in env_text.splitlines())
     assert oct(runtime_env_path(tmp_cfg).stat().st_mode & 0o777) == "0o600"
 
     fresh = Config(storage=StorageCfg(data_dir=str(tmp_cfg.data_dir)))
@@ -117,7 +121,9 @@ async def test_admin_can_add_model_endpoint_and_reload_overlay(tmp_cfg, monkeypa
     assert fresh.llm.endpoints["kimi"].model == "kimi-k3.1-pro"
     assert fresh.generation.authors == ["kimi", "session"]
     assert fresh.models.generation == "deepseek-flash"
-    assert fresh.secrets.KIMI_API_KEY == SECRET
+    assert fresh.llm.endpoints["kimi"].api_key_env == "ENDPOINT_KIMI_API_KEY"
+    assert os.environ.get("ENDPOINT_KIMI_API_KEY") == SECRET
+    os.environ.pop("ENDPOINT_KIMI_API_KEY", None)
     os.environ.pop("KIMI_API_KEY", None)
 
 
@@ -148,4 +154,12 @@ def test_overlay_helpers_reject_unsafe_values(tmp_cfg):
     set_api_key(tmp_cfg, "KIMI_API_KEY", "short")
     assert any(item["preview"] == "••••" for item in snapshot(tmp_cfg)["api_keys"] if item["name"] == "KIMI_API_KEY")
     assert preview["endpoints"][0]["name"] == "kimi"
+    assert tmp_cfg.llm.endpoints["kimi"].api_key_env == "ENDPOINT_KIMI_API_KEY"
+    with pytest.raises(OpsError, match="接口地址"):
+        upsert_endpoint(
+            tmp_cfg, name="kimi", base_url="https://attacker.example/v1",
+            model="kimi-k3.1-pro",
+        )
+    with pytest.raises(OpsError, match=r"\*_API_KEY"):
+        set_api_key(tmp_cfg, "LD_PRELOAD", "/tmp/x.so")
     os.environ.pop("KIMI_API_KEY", None)

@@ -15,7 +15,7 @@ port = 8080
 research_mode = "lightweight"
 concurrency = 2
 wall_clock_seconds = 1800
-budget_tokens = 100000
+budget_tokens = 0                   # 0 = no token cap
 budget_usd = 1.0
 
 [scoping]
@@ -38,6 +38,8 @@ vision_enabled = false
 
 # Select a provider/model appropriate for the server and set its key in the
 # environment. These defaults are examples only; verify model availability.
+# If provider is openai_compatible (DeepSeek etc.), every [models] id must be
+# that vendor's own name — leftover anthropic/... ids make the classifier fail.
 [llm]
 provider = "openrouter"
 

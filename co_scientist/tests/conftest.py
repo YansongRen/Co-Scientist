@@ -4,10 +4,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import pytest_asyncio
 
 from co_scientist.config import Config, RunCfg, SafetyCfg, StorageCfg
 from co_scientist.storage import db as db_mod
+
+TEST_ADMIN_PASSWORD = "test-admin-pass"
+
+
+@pytest.fixture(autouse=True)
+def admin_password_env(monkeypatch):
+    monkeypatch.setenv("CO_SCIENTIST_ADMIN_PASSWORD", TEST_ADMIN_PASSWORD)
+    monkeypatch.delenv("CO_SCIENTIST_ADMIN_PASSWORD_RESET", raising=False)
 
 
 @pytest_asyncio.fixture

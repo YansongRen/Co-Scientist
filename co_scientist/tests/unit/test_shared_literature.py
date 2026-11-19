@@ -1,5 +1,5 @@
 """Shared literature is one session-model pass, then authors stop searching."""
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -67,9 +67,11 @@ def test_ready_brief_is_exclusive_except_feedback_driven():
 class _SessionModel:
     def __init__(self):
         self.routes = []
+        self.specs = []
 
     async def call(self, spec, ctx, **kwargs):
         self.routes.append(spec.route)
+        self.specs.append(spec)
         message = SynthMessage(
             stop_reason="tool_use",
             content=[ToolUseBlock(
@@ -109,6 +111,27 @@ async def test_shared_pass_uses_the_session_model_not_a_generation_author(tmp_cf
     assert record["skill_mode"] == "quick"
     assert llm.routes[0].model == "deepseek-flash"
     assert llm.routes[0].endpoint == ""
+    tool_names = {tool["name"] for tool in llm.specs[0].tools}
+    assert "web_search" not in tool_names
+    assert "pubmed_search" in tool_names
     saved = await gather_shared_literature(deps, session)
     assert saved["model"] == "deepseek-flash"
     assert len(llm.routes) == 1
+
+
+@pytest.mark.asyncio
+async def test_shared_pass_skips_when_wall_clock_is_almost_gone(tmp_cfg, conn):
+    now = datetime.now(UTC)
+    session = Session(
+        id="ses_lit_deadline", created_at=now, updated_at=now, status="running",
+        research_goal="问题", research_plan=ResearchPlan(objective="问题"),
+        config_snapshot={}, budget_tokens=0, budget_usd=1,
+        wall_deadline=now + timedelta(seconds=30),
+    )
+    await sess_repo.insert(conn, session)
+    llm = _SessionModel()
+    deps = AgentDeps(tmp_cfg, conn, llm, ToolRegistry(tmp_cfg).discover())
+    record = await gather_shared_literature(deps, session)
+    assert record["status"] == "failed"
+    assert record["error_type"] == "wall_clock"
+    assert llm.specs == []

@@ -183,7 +183,7 @@ async def publish(agent, sid, record, strategy, render_md, citations):
 
 
 async def _hypothesis_safety(agent, sid, statement) -> str:
-    """`allow`, `warn`, `quarantine`, or `block`. Fail-open when disabled."""
+    """`allow`, `warn`, `quarantine`, or `block`. Fail-open only when disabled."""
     if not agent.deps.cfg.safety.enable_classifier:
         return "allow"
     from ..safety.classifier import SafetyClassifier

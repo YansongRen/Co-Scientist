@@ -4,6 +4,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
+from co_scientist.tests.conftest import TEST_ADMIN_PASSWORD
 from co_scientist.web.app import create_app
 
 
@@ -38,7 +39,7 @@ async def test_visitors_register_and_only_the_seeded_admin_opens_admin(tmp_cfg):
         assert signed_out.status_code == 303 and signed_out.headers["location"] == "/login"
 
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as admin:
-        created = await admin.post("/login", data={"username": "rys", "password": "123456"})
+        created = await admin.post("/login", data={"username": "rys", "password": TEST_ADMIN_PASSWORD})
         assert created.status_code == 303 and created.headers["location"] == "/admin"
         page = await admin.get("/admin")
         assert page.status_code == 200

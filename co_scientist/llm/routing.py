@@ -226,10 +226,24 @@ def generation_author(cfg: Config, *, task_id: str = "", batch_index: int | None
     return names[int(batch_index) % len(names)]
 
 
+_OPENROUTERISH_PREFIXES = (
+    "anthropic/", "google/", "openai/", "meta-llama/", "mistralai/", "qwen/",
+)
+
+
+def openai_compat_foreign_model(cfg: Config, model: str) -> bool:
+    """True when an OpenRouter-style id is pointed at an openai_compatible backend."""
+    if (cfg.llm.provider or "").strip().lower() != "openai_compatible":
+        return False
+    lowered = (model or "").lower()
+    return any(lowered.startswith(prefix) for prefix in _OPENROUTERISH_PREFIXES)
+
+
 def route(cfg: Config, agent: str, mode: str | None = None, *, degraded: bool = False,
           endpoint: str = "") -> ModelRoute:
     """Pick a model for a given (agent, mode). If `degraded`, walk one step down."""
     m = cfg.models
+    classifier_model = m.parse_goal if openai_compat_foreign_model(cfg, m.classifier) else m.classifier
     model = {
         ("generation", "literature"):  m.generation,
         ("generation", "debate"):      m.generation,
@@ -252,7 +266,7 @@ def route(cfg: Config, agent: str, mode: str | None = None, *, degraded: bool = 
         ("metareview", "system"):      m.metareview_feedback,
         ("metareview", "final"):       m.metareview_final,
         ("parse_goal", None):          m.parse_goal,
-        ("classifier", None):          m.classifier,
+        ("classifier", None):          classifier_model,
         ("judge", None):               m.judge,
     }.get((agent, mode), m.generation)
 

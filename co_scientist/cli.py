@@ -534,6 +534,11 @@ def serve(
     ctx: typer.Context,
     host: str | None = typer.Option(None, "--host"),
     port: int | None = typer.Option(None, "--port"),
+    recover_running: bool = typer.Option(
+        False,
+        "--recover-running",
+        help="Resume sessions that were still status=running when this process last stopped.",
+    ),
 ) -> None:
     """Launch the FastAPI + htmx + SSE web UI."""
     cfg, _ = ctx.obj
@@ -543,7 +548,10 @@ def serve(
 
     from .web.app import create_app
 
-    uvicorn.run(create_app(cfg, recover_running=True), host=host, port=port, log_level="info")
+    uvicorn.run(
+        create_app(cfg, recover_running=recover_running),
+        host=host, port=port, log_level="info",
+    )
 
 
 @app.command()
