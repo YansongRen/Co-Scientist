@@ -216,6 +216,7 @@ class OpenAIClient:
             kwargs["base_url"] = base_url
         if default_headers:
             kwargs["default_headers"] = default_headers
+        self._base_url = base_url or ""
         self._client = AsyncOpenAI(**kwargs)
 
     # ----------------------------- main call ----------------------------- #
@@ -246,6 +247,13 @@ class OpenAIClient:
         # endpoint has its own vendor and must not inherit that body.
         if self._cfg.llm.openai.extra_body and not self._force_endpoint:
             request["extra_body"] = self._cfg.llm.openai.extra_body
+        # Moonshot rejects a forced tool while thinking is on. Named Kimi
+        # calls keep their own body and only disable thinking when tools are
+        # actually offered.
+        if self._force_endpoint and request.get("tools") and _kimi_tool_call(
+            self._base_url, spec.route.model
+        ):
+            request["extra_body"] = {"thinking": {"type": "disabled"}}
 
         # Estimate + admit (same accounting as AnthropicClient).
         est_in = est_input_tokens or _rough_token_count(spec)
@@ -336,6 +344,12 @@ class OpenAIClient:
 
 # --------------------------------------------------------------------------- #
 # Request translation: AgentCallSpec → OpenAI Chat Completions
+
+def _kimi_tool_call(base_url: str, model: str) -> bool:
+    host = (base_url or "").lower()
+    name = (model or "").lower()
+    return "moonshot" in host or name.startswith("kimi")
+
 
 def _build_openai_request(
     spec: AgentCallSpec,

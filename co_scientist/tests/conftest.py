@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest_asyncio
 
-from co_scientist.config import Config, RunCfg, StorageCfg
+from co_scientist.config import Config, RunCfg, SafetyCfg, StorageCfg
 from co_scientist.storage import db as db_mod
 
 
@@ -16,6 +16,8 @@ async def tmp_cfg(tmp_path: Path) -> Config:
     cfg = Config(
         run=RunCfg(),
         storage=StorageCfg(data_dir=str(tmp_path)),
+        # Offline tests do not call the safety model unless a case turns this on.
+        safety=SafetyCfg(enable_classifier=False),
     )
     (tmp_path / "artifacts").mkdir(parents=True, exist_ok=True)
     (tmp_path / "vectors").mkdir(parents=True, exist_ok=True)

@@ -13,6 +13,8 @@ FIELDS = frozenset({
     "input_tokens", "output_tokens", "cost_usd", "task_id", "target", "kind",
     "status", "iteration", "follow_hypothesis_ids", "review_ids", "match_ids",
     "label", "n_items", "hypothesis_ids", "mode", "strategy", "winner", "elo_a", "elo_b",
+    "stop_reason", "hypothesis_count", "output", "detail",
+    "safety_action", "categories", "confidence", "label",
 })
 
 

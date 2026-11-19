@@ -1,6 +1,7 @@
 """Generation can leave the session provider for a named endpoint."""
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -10,7 +11,7 @@ import pytest
 from co_scientist.config import EndpointCfg
 from co_scientist.llm.anthropic_client import AgentCallSpec, CachedBlock, CallContext
 from co_scientist.llm.budgets import TokenBudget
-from co_scientist.llm.provider import get_provider
+from co_scientist.llm.provider import get_provider, reset_endpoint_gates
 from co_scientist.llm.routing import ModelRoute, generation_author, route
 from co_scientist.models import ResearchPlan, Session
 
@@ -133,3 +134,97 @@ async def test_named_generation_call_uses_its_own_key_and_skips_session_body(tmp
     deepseek_sent = made[0].chat.completions.create.await_args.kwargs
     assert deepseek_sent["model"] == "deepseek-flash"
     assert deepseek_sent["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+@pytest.mark.asyncio
+async def test_kimi_tool_call_disables_thinking_without_copying_session_body(tmp_cfg, conn):
+    from co_scientist.storage.repos import sessions as repo
+
+    tmp_cfg.llm.provider = "openai_compatible"
+    tmp_cfg.llm.openai.base_url = "https://api.deepseek.com"
+    tmp_cfg.llm.openai.extra_body = {"thinking": {"type": "disabled"}, "deepseek_only": True}
+    tmp_cfg.secrets.OPENAI_API_KEY = "deepseek-secret"
+    tmp_cfg.secrets.KIMI_API_KEY = "kimi-secret"
+    tmp_cfg.llm.endpoints = {
+        "kimi": EndpointCfg(
+            base_url="https://api.moonshot.cn/v1",
+            model="kimi-k3.1-pro",
+            api_key_env="KIMI_API_KEY",
+        ),
+    }
+    await repo.insert(conn, Session(
+        id="ses_kimi_tools", created_at=datetime.now(UTC), updated_at=datetime.now(UTC),
+        status="running", research_goal="g", research_plan=ResearchPlan(objective="x"),
+        config_snapshot={}, budget_tokens=100_000, budget_usd=10.0,
+    ))
+    made: list[MagicMock] = []
+
+    def factory(**kwargs):
+        inst = MagicMock()
+        inst.chat.completions.create = AsyncMock(return_value=_resp())
+        made.append(inst)
+        return inst
+
+    with patch("openai.AsyncOpenAI", side_effect=factory):
+        client = get_provider(tmp_cfg, db=conn, budget=TokenBudget(cfg=tmp_cfg, budget_tokens=100_000, budget_usd=10.0))
+        await client.call(AgentCallSpec(
+            route=ModelRoute(agent="generation", mode="literature", model="kimi-k3.1-pro", endpoint="kimi"),
+            system_blocks=[CachedBlock("sys")],
+            user_blocks=[CachedBlock("propose")],
+            tools=[{"name": "record_hypothesis", "description": "save", "input_schema": {"type": "object"}}],
+            tool_choice={"type": "tool", "name": "record_hypothesis"},
+            max_output_tokens=64,
+        ), CallContext(session_id="ses_kimi_tools", task_id=None, agent="generation", action="t"))
+    sent = made[-1].chat.completions.create.await_args.kwargs
+    assert sent["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "deepseek_only" not in sent["extra_body"]
+
+
+@pytest.mark.asyncio
+async def test_named_endpoint_default_is_one_in_flight_call(tmp_cfg, conn):
+    from co_scientist.storage.repos import sessions as repo
+
+    reset_endpoint_gates()
+    tmp_cfg.llm.provider = "openai_compatible"
+    tmp_cfg.llm.openai.base_url = "https://api.deepseek.com"
+    tmp_cfg.secrets.OPENAI_API_KEY = "deepseek-secret"
+    tmp_cfg.secrets.KIMI_API_KEY = "kimi-secret"
+    tmp_cfg.llm.endpoints = {
+        "kimi": EndpointCfg(
+            base_url="https://api.moonshot.cn/v1",
+            model="kimi-k3",
+            api_key_env="KIMI_API_KEY",
+        ),
+    }
+    await repo.insert(conn, Session(
+        id="ses_gate", created_at=datetime.now(UTC), updated_at=datetime.now(UTC),
+        status="running", research_goal="g", research_plan=ResearchPlan(objective="x"),
+        config_snapshot={}, budget_tokens=100_000, budget_usd=10.0,
+    ))
+    current = 0
+    peak = 0
+
+    async def slow(**kwargs):
+        nonlocal current, peak
+        current += 1
+        peak = max(peak, current)
+        await asyncio.sleep(0.05)
+        current -= 1
+        return _resp()
+
+    def factory(**kwargs):
+        inst = MagicMock()
+        inst.chat.completions.create = slow
+        return inst
+
+    spec = AgentCallSpec(
+        route=ModelRoute(agent="generation", mode="literature", model="kimi-k3", endpoint="kimi"),
+        system_blocks=[CachedBlock("sys")],
+        user_blocks=[CachedBlock("propose")],
+        max_output_tokens=64,
+    )
+    ctx = CallContext(session_id="ses_gate", task_id=None, agent="generation", action="t")
+    with patch("openai.AsyncOpenAI", side_effect=factory):
+        client = get_provider(tmp_cfg, db=conn, budget=TokenBudget(cfg=tmp_cfg, budget_tokens=100_000, budget_usd=10.0))
+        await asyncio.gather(client.call(spec, ctx), client.call(spec, ctx))
+    assert peak == 1

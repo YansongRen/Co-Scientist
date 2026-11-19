@@ -182,6 +182,13 @@ def test_review_score_rejects_invalid_numbers(score):
         ReviewScores(correctness=score)
 
 
+def test_review_score_accepts_numeric_strings():
+    scores = ReviewScores(novelty="0.5", correctness="1", testability="0", feasibility=" 0.25 ")
+    assert scores.model_dump() == {
+        "novelty": 0.5, "correctness": 1.0, "testability": 0.0, "feasibility": 0.25,
+    }
+
+
 def tracker():
     return StabilityTracker(5, 3, 25)
 

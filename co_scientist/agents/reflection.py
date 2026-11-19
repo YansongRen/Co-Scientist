@@ -25,12 +25,32 @@ from ..storage.repos import hypotheses as hyp_repo
 from ..storage.repos import reviews as rev_repo
 from ..storage.repos import scientific_evidence as scientific_evidence_repo
 from ..storage.repos import sessions as sess_repo
+from ..literature.shared import load_shared_literature, render_brief_markdown
 from .base import BaseAgent
 from .schemas import RECORD_REVIEW_TOOL
 
 SEARCH_KINDS = {"full", "verification", "observation", "recurrent"}
 NO_SEARCH_KINDS = {"initial", "simulation"}
 REVIEW_KINDS = SEARCH_KINDS | NO_SEARCH_KINDS
+
+
+async def _articles_block(cfg, session_id: str) -> str:
+    record = await load_shared_literature(cfg, session_id)
+    shared = ""
+    if record and record.get("status") == "ready":
+        shared = (
+            "Start from this shared reading. Search only to check a claim it does not cover.\n\n"
+            + render_brief_markdown(record) + "\n\n"
+        )
+    return (
+        shared
+        + "Use web_search, pubmed_search, arxiv_search, europe_pmc_search to find papers, "
+        "then read_paper on each paper you rely on. Abstracts only choose what to open. "
+        "Cite URLs that appeared in a tool result or the shared reading. If reading_depth is not full_text, "
+        "say so and do not describe unread methods or results. "
+        "For every evidence item, label relation, support_level and source scope. "
+        "Do not equate a matching quotation with support for the hypothesis."
+    )
 
 
 class ReflectionAgent(BaseAgent):
@@ -71,8 +91,10 @@ class ReflectionAgent(BaseAgent):
                 }
                 return await self._store(session, h, task, record, review_id, loop_result=None)
 
-        feedback = await fb_repo.latest_system_feedback(self.deps.db, session.id)
-        feedback_text = feedback.text if feedback is not None else ""
+        feedback_text = await fb_repo.compose_prompt(
+            self.deps.db, session.id, target_id=h.id,
+            limit_chars=self.deps.cfg.generation.feedback_chars,
+        )
         record, loop_result = await self._model_review(session, h, task, kind, feedback_text)
         record["kind"] = kind
         return await self._store(session, h, task, record, review_id, loop_result=loop_result)
@@ -90,14 +112,7 @@ class ReflectionAgent(BaseAgent):
             "hypothesis_id": h.id,
             "hypothesis_text": quote_hypothesis(h.full_text, id_=h.id),
             "hypothesis": quote_hypothesis(h.full_text, id_=h.id),
-            "articles_block": (
-                "Use web_search, pubmed_search, arxiv_search, europe_pmc_search to find papers, "
-                "then read_paper on each paper you rely on. Abstracts only choose what to open. "
-                "Cite URLs that appeared in a tool result. If reading_depth is not full_text, "
-                "say so and do not describe unread methods or results. "
-                "For every evidence item, label relation, support_level and source scope. "
-                "Do not equate a matching quotation with support for the hypothesis."
-            ),
+            "articles_block": await _articles_block(self.deps.cfg, session.id),
             "scientific_evidence": evidence_block,
             "article": article["text"] if article else "",
             "article_id": article["id"] if article else "",

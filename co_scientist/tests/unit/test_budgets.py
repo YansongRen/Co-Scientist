@@ -78,6 +78,35 @@ async def test_share_percent_for_unknown_agent_is_zero() -> None:
 
 
 @pytest.mark.asyncio
+async def test_token_cap_error_names_tokens_not_usd() -> None:
+    cfg = Config()
+    b = TokenBudget(cfg=cfg, budget_tokens=100, budget_usd=100.0)
+    with pytest.raises(BudgetExceeded, match="token budget") as exc:
+        await b.admit("generation", est_tokens=200, est_usd=0.01)
+    assert exc.value.kind == "tokens"
+    assert "cap=100" in str(exc.value)
+    assert "used_usd" not in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_usd_cap_error_names_usd() -> None:
+    cfg = Config()
+    b = TokenBudget(cfg=cfg, budget_tokens=100_000, budget_usd=0.5)
+    with pytest.raises(BudgetExceeded, match="USD budget") as exc:
+        await b.admit("generation", est_tokens=10, est_usd=1.0)
+    assert exc.value.kind == "usd"
+    assert "cap=0.5000" in str(exc.value)
+    assert "token budget" not in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_zero_token_cap_is_unlimited() -> None:
+    cfg = Config()
+    b = TokenBudget(cfg=cfg, budget_tokens=0, budget_usd=10.0)
+    await b.admit("generation", est_tokens=1_000_000, est_usd=0.01)
+
+
+@pytest.mark.asyncio
 async def test_settle_with_zero_actual_releases_reservation() -> None:
     """If a call fails after admission (e.g. retry exhaustion), the caller must
     be able to release the reservation with actual=0 so the reserve doesn't leak."""

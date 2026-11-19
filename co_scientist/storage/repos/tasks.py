@@ -130,8 +130,13 @@ async def fail(
     *,
     max_attempts: int = 3,
     requeue_backoff_seconds: list[int] | None = None,
+    terminal: bool = False,
 ) -> str:
-    """Increment attempts; either requeue or dead-letter. Returns the final status."""
+    """Increment attempts; either requeue or dead-letter. Returns the final status.
+
+    `terminal=True` dead-letters immediately (budget exhaustion is not a
+    transient worker failure and must not burn the retry budget).
+    """
     _ = requeue_backoff_seconds  # backoff is enforced cooperatively by the scheduler (M5+)
     async with conn.execute(
         "SELECT attempts FROM tasks WHERE id=?", (task_id,)
@@ -140,7 +145,7 @@ async def fail(
     if row is None:
         return "missing"
     attempts = row["attempts"] + 1
-    if attempts >= max_attempts:
+    if terminal or attempts >= max_attempts:
         await conn.execute(
             "UPDATE tasks SET status='dead', attempts=?, last_error=?, finished_at=? WHERE id=?",
             (attempts, error[:4000], _now(), task_id),

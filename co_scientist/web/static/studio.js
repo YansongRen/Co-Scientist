@@ -40,6 +40,15 @@
     metareview: ['Meta-review', '综合研究结论', 'file', '综述'],
   };
   const statusText = value => ({done:'已完成',running:'运行中',active:'运行中',paused:'已暂停',failed:'运行失败',error:'运行失败',pending:'等待中',awaiting_approval:'等待人工审核',unused:'未执行',dead:'失败',stopped:'已停止',aborted:'已终止'}[value] || value || '准备就绪');
+  function sessionStatusLabel(s) {
+    if (!s) return '准备就绪';
+    if (s.status === 'done') {
+      if (!Number(s.hypothesis_count)) return '已结束（无产出）';
+      if (s.stop_reason === 'budget') return '已结束（预算用尽）';
+      if (s.stop_reason === 'wall_clock') return '已结束（到达时限）';
+    }
+    return statusText(s.status);
+  }
   const fmt = value => Number(value || 0).toLocaleString('zh-CN');
   const money = value => `$${Number(value || 0).toFixed(2)}`;
   const date = value => {
@@ -79,7 +88,7 @@
   }
   function renderSidebar() {
     $('#session-count').textContent = state.sessions.length;
-    $('#session-list').innerHTML = state.sessions.length ? state.sessions.map(s => `<button class="session-item ${s.id === state.id ? 'active' : ''}" data-session="${esc(s.id)}" title="${esc(s.research_goal)}"><span class="session-item-title">${esc(title(s.research_goal))}</span><span class="session-item-meta">${date(s.created_at)}<span class="dot"></span>${statusText(s.status)}<span class="dot"></span>${s.hypothesis_count} 条假设</span></button>`).join('') : '<div class="sidebar-loading">暂无研究</div>';
+    $('#session-list').innerHTML = state.sessions.length ? state.sessions.map(s => `<button class="session-item ${s.id === state.id ? 'active' : ''}" data-session="${esc(s.id)}" title="${esc(s.research_goal)}"><span class="session-item-title">${esc(title(s.research_goal))}</span><span class="session-item-meta">${date(s.created_at)}<span class="dot"></span>${sessionStatusLabel(s)}<span class="dot"></span>${s.hypothesis_count} 条假设</span></button>`).join('') : '<div class="sidebar-loading">暂无研究</div>';
   }
   async function selectSession(id, {quiet = false} = {}) {
     clearTimeout(state.timer);
@@ -102,12 +111,21 @@
       if (!state.runtime || data.runtime.server_time >= state.runtime.server_time) state.runtime = data.runtime;
       if (!quiet && data.session.status === 'running' && state.view === 'research' && !new URLSearchParams(location.search).has('view')) state.view = 'agents';
       const listed = state.sessions.find(s => s.id === id);
-      if (listed) {listed.status = data.session.status; listed.hypothesis_count = data.hypotheses.length;}
-      const scroll = $('#conversation-scroll').scrollTop;
-      const openEvidence = quiet ? [...document.querySelectorAll('[data-evidence-card] details[open]')].map(e=>e.closest('[data-evidence-card]').dataset.evidenceCard) : [];
-      render();
-      openEvidence.forEach(id=>document.querySelector(`[data-evidence-card="${CSS.escape(id)}"] details`)?.setAttribute('open',''));
-      $('#conversation-scroll').scrollTop = quiet ? scroll : 0;
+      if (listed) {listed.status = data.session.status; listed.hypothesis_count = data.hypotheses.length; listed.stop_reason = data.session.stop_reason;}
+      const preserveNetwork = quiet && state.view === 'agents' && $('#agent-network');
+      if (preserveNetwork) {
+        $('#hyp-count').textContent = data.hypotheses.length || 0;
+        $('#session-state').textContent = sessionStatusLabel(data.session);
+        $('#inspector-content').innerHTML = inspector(data);
+        renderSidebar();
+        updateMonitor();
+      } else {
+        const scroll = $('#conversation-scroll').scrollTop;
+        const openEvidence = quiet ? [...document.querySelectorAll('[data-evidence-card] details[open]')].map(e=>e.closest('[data-evidence-card]').dataset.evidenceCard) : [];
+        render();
+        openEvidence.forEach(card=>document.querySelector(`[data-evidence-card="${CSS.escape(card)}"] details`)?.setAttribute('open',''));
+        $('#conversation-scroll').scrollTop = quiet ? scroll : 0;
+      }
       if (['running','active'].includes(data.session.status)) {
         state.timer = setTimeout(() => selectSession(id, {quiet:true}), 5000);
       }
@@ -146,7 +164,7 @@
     $('.composer-area').hidden = !d && state.entry !== 'direct';
     $('#view-tabs').hidden = !d;
     $('#hyp-count').textContent = d?.hypotheses.length || 0;
-    $('#session-state').textContent = d ? statusText(d.session.status) : '准备就绪';
+    $('#session-state').textContent = d ? sessionStatusLabel(d.session) : '准备就绪';
     document.querySelectorAll('[data-view]').forEach(el => el.setAttribute('aria-selected', String(el.dataset.view === state.view)));
     document.querySelector('[data-action="library"]').classList.toggle('current', state.view === 'sources');
     document.querySelector('[data-action="workspace"]').classList.toggle('current', state.view !== 'sources');
@@ -215,6 +233,7 @@
       agent_recorded:tools[p.tool] || '记录结构化结果', session_started:'Supervisor 启动研究',
       agent_step:p.label || '执行任务步骤',
       session_done:'研究会话结束',
+      literature_gathered: p.status === 'ready' ? `共享文献阅读完成 · ${p.paper_count || 0} 篇` : '共享文献阅读没有完成',
     };
     const details = [p.detail, p.error || p.err || p.error_type, p.strategy ? `演化策略：${({combine:'合并',simplify:'简化',out_of_box:'跨方向探索'})[p.strategy] || p.strategy}` : '', p.mode ? `比较模式：${p.mode}` : '', p.n_items != null ? `${p.n_items} 条假设` : '', p.hypothesis_ids?.length ? `输入：${p.hypothesis_ids.join(' / ')}` : '', p.target ? `审查对象：${p.target}` : '', p.kind ? ({hypothesis_created:'已生成假设',review_completed:'已保存审查意见',tournament_match_complete:'已完成假设比较',final_overview_generated:'已生成最终报告',proximity_updated:'已更新相似性图',system_feedback_generated:'已生成系统反馈'}[p.kind] || p.kind) : '', p.result_count != null ? `返回 ${p.result_count} 条结果` : '', p.input_tokens != null ? `${fmt(p.input_tokens + p.output_tokens)} tokens` : '', p.duration_ms != null ? `耗时 ${(p.duration_ms/1000).toFixed(1)} 秒` : ''].filter(Boolean);
     return {title:titles[e.event] || e.event, detail:details.join(' · ')};
@@ -333,7 +352,7 @@
     const count = d.hypotheses.length;
     const parsed = new DOMParser().parseFromString(d.report.html, 'text/html');
     const summary = parsed.querySelector('p')?.textContent || 'Agent 将围绕你的研究问题，检索文献、提出假设，并通过独立审查与比较逐步完善研究方向。';
-    return `<div class="user-label">研究问题 · ${date(d.session.created_at)} ${icon('clock')}</div><div class="user-question">${esc(goalText(d.session.research_goal))}${goalText(d.session.research_goal) !== d.session.research_goal ? '<br><button class="question-expand" data-action="original">查看原始问题 ↗</button>' : ''}</div><article class="assistant-message"><div class="assistant-heading"><span class="assistant-mark">${icon('flask')}</span><strong>Co-Scientist</strong><span class="completion-badge">${icon(completed ? 'check' : 'activity')}${statusText(d.session.status)}</span></div><div class="assistant-body"><div class="agent-pipeline" aria-label="Agent 执行状态">${d.stages.map((s, i) => `${i ? `<span class="pipeline-arrow">${icon('chevron')}</span>` : ''}<span class="pipeline-step ${esc(s.status)}" title="${agents[s.agent][0]} · ${statusText(s.status)}">${icon(s.status === 'done' ? 'check' : s.status === 'unused' ? 'minus' : 'activity')}${agents[s.agent][3]}</span>`).join('')}</div><h1 class="result-heading">${count ? `${count === 2 ? '两' : count}条可验证的研究假设` : '研究正在展开'}</h1><div class="result-summary">${esc(summary)}</div><div class="hypothesis-cards">${d.hypotheses.map(card).join('') || '<div class="empty-state">正在等待第一条假设…</div>'}</div><button class="evidence-entry" data-view="evidence">${icon('book')}<span>检查证据与适用范围<small>${d.evidence?.summary.total || 0} 条证据 · ${d.evidence?.summary.scope_warnings || 0} 条范围提示 · 新颖性待核验</small></span>${icon('chevron')}</button>${d.report.markdown ? `<button class="report-link" data-action="report">${icon('file')} 阅读完整研究报告 ${icon('chevron')}</button><div class="message-actions"><button class="icon-button" data-action="copy" aria-label="复制研究报告" title="复制报告">${icon('copy')}</button><button class="icon-button" data-action="download" aria-label="下载 Markdown 报告" title="下载 Markdown">${icon('download')}</button><span>${d.sources.length} 篇参考资料</span></div>` : ''}</div></article>`;
+    return `<div class="user-label">研究问题 · ${date(d.session.created_at)} ${icon('clock')}</div><div class="user-question">${esc(goalText(d.session.research_goal))}${goalText(d.session.research_goal) !== d.session.research_goal ? '<br><button class="question-expand" data-action="original">查看原始问题 ↗</button>' : ''}</div><article class="assistant-message"><div class="assistant-heading"><span class="assistant-mark">${icon('flask')}</span><strong>Co-Scientist</strong><span class="completion-badge">${icon(completed ? 'check' : 'activity')}${sessionStatusLabel(d.session)}</span></div><div class="assistant-body"><div class="agent-pipeline" aria-label="Agent 执行状态">${d.stages.map((s, i) => `${i ? `<span class="pipeline-arrow">${icon('chevron')}</span>` : ''}<span class="pipeline-step ${esc(s.status)}" title="${agents[s.agent][0]} · ${statusText(s.status)}">${icon(s.status === 'done' ? 'check' : s.status === 'unused' ? 'minus' : 'activity')}${agents[s.agent][3]}</span>`).join('')}</div><h1 class="result-heading">${count ? `${count === 2 ? '两' : count}条可验证的研究假设` : (completed ? (d.session.detail || '没有产生假设') : '研究正在展开')}</h1><div class="result-summary">${esc(summary)}</div><div class="hypothesis-cards">${d.hypotheses.map(card).join('') || '<div class="empty-state">正在等待第一条假设…</div>'}</div><button class="evidence-entry" data-view="evidence">${icon('book')}<span>检查证据与适用范围<small>${d.evidence?.summary.total || 0} 条证据 · ${d.evidence?.summary.scope_warnings || 0} 条范围提示 · 新颖性待核验</small></span>${icon('chevron')}</button>${d.report.markdown ? `<button class="report-link" data-action="report">${icon('file')} 阅读完整研究报告 ${icon('chevron')}</button><div class="message-actions"><button class="icon-button" data-action="copy" aria-label="复制研究报告" title="复制报告">${icon('copy')}</button><button class="icon-button" data-action="download" aria-label="下载 Markdown 报告" title="下载 Markdown">${icon('download')}</button><span>${d.sources.length} 篇参考资料</span></div>` : ''}</div></article>`;
   }
   function hypothesesView(d) {
     return `<h1 class="view-heading">研究假设</h1><form id="propose-form" class="propose-form"><label>提交自己的假设<textarea name="statement" maxlength="4000" required placeholder="写一条可检验的假设。它会先经过初审和文献审查，通过后才参加 Elo 比较。"></textarea></label><button class="secondary-button" type="submit">加入审查队列</button><p id="propose-status"></p></form><div class="hypothesis-cards">${d.hypotheses.map(card).join('') || '<div class="empty-state">还没有假设，等待 Generation Agent 开始工作。</div>'}</div>`;
@@ -351,7 +370,7 @@
     if(!d)return '';
     const budget = d?.session.budget_usd ?? defaults.budget;
     const cost = d?.usage.cost_usd || 0;
-    return `<div class="topic-icon">${icon('flask')}</div><h2 class="overview-topic">${d ? esc(title(d.session.research_goal)) : '下一项研究，<br>从这里开始。'}</h2><span class="panel-state">${icon(d?.session.status === 'done' ? 'check' : 'clock')}${d ? statusText(d.session.status) : '等待研究问题'}</span><hr class="panel-rule"><div class="panel-label">研究产出</div><div class="metric-row"><span>候选假设</span><strong>${d?.hypotheses.length || '—'}</strong></div><div class="metric-row"><span>参考资料</span><strong>${d?.sources.length || '—'}</strong></div><div class="metric-row"><span>假设比较</span><strong>${d ? d.matches.length + (d.matches.length === 40 ? '+' : '') : '—'}</strong></div><hr class="panel-rule"><div class="panel-label">运行预算</div><div class="metric-row"><span>已用 / 上限</span><strong>${money(cost)} / ${money(budget)}</strong></div><div class="progress-track"><i style="width:${Math.min(100, budget > 0 ? cost / budget * 100 : 0)}%"></i></div><hr class="panel-rule"><div class="panel-label">Agent</div><div class="agent-list" id="agent-team">${agentList(d)}</div>${d ? `<hr class="panel-rule"><div class="panel-label">研究文件</div>${(d.attachments||[]).map(f=>`<a class="panel-doc" href="${esc(f.url)}" title="${esc(f.name)}">${icon('file')}<span class="file-text">${esc(f.name)}</span></a>`).join('')}${d.report.markdown ? `<button class="panel-doc" data-action="report">${icon('file')}<span class="file-text">研究报告</span>${icon('chevron')}</button>` : ''}<button class="panel-doc" data-action="library">${icon('book')}<span class="file-text">参考文献</span>${icon('chevron')}</button><button class="panel-doc" data-view="activity">${icon('activity')}<span class="file-text">模型调用</span>${icon('chevron')}</button>` : ''}`;
+    return `<div class="topic-icon">${icon('flask')}</div><h2 class="overview-topic">${d ? esc(title(d.session.research_goal)) : '下一项研究，<br>从这里开始。'}</h2><span class="panel-state">${icon(d?.session.status === 'done' ? 'check' : 'clock')}${d ? sessionStatusLabel(d.session) : '等待研究问题'}</span><hr class="panel-rule"><div class="panel-label">研究产出</div><div class="metric-row"><span>候选假设</span><strong>${d?.hypotheses.length || '—'}</strong></div><div class="metric-row"><span>参考资料</span><strong>${d?.sources.length || '—'}</strong></div><div class="metric-row"><span>假设比较</span><strong>${d ? d.matches.length + (d.matches.length === 40 ? '+' : '') : '—'}</strong></div><hr class="panel-rule"><div class="panel-label">运行预算</div><div class="metric-row"><span>已用 / 上限</span><strong>${money(cost)} / ${money(budget)}</strong></div><div class="progress-track"><i style="width:${Math.min(100, budget > 0 ? cost / budget * 100 : 0)}%"></i></div><hr class="panel-rule"><div class="panel-label">Agent</div><div class="agent-list" id="agent-team">${agentList(d)}</div>${d ? `<hr class="panel-rule"><div class="panel-label">研究文件</div>${(d.attachments||[]).map(f=>`<a class="panel-doc" href="${esc(f.url)}" title="${esc(f.name)}">${icon('file')}<span class="file-text">${esc(f.name)}</span></a>`).join('')}${d.report.markdown ? `<button class="panel-doc" data-action="report">${icon('file')}<span class="file-text">研究报告</span>${icon('chevron')}</button>` : ''}<button class="panel-doc" data-action="library">${icon('book')}<span class="file-text">参考文献</span>${icon('chevron')}</button><button class="panel-doc" data-view="activity">${icon('activity')}<span class="file-text">模型调用</span>${icon('chevron')}</button>` : ''}`;
   }
   function detail(label, content) {
     $('#detail-eyebrow').textContent = label;
@@ -391,7 +410,7 @@
   function search() {
     const query = $('#search-input').value.trim().toLowerCase();
     const list = state.sessions.filter(s => `${s.research_goal} ${title(s.research_goal)}`.toLowerCase().includes(query));
-    $('#search-results').innerHTML = list.map(s => `<button class="search-result" data-session="${esc(s.id)}">${esc(title(s.research_goal))}<small>${date(s.created_at)} · ${statusText(s.status)} · ${s.hypothesis_count} 条假设</small></button>`).join('') || '<div class="empty-state">没有找到相关研究。</div>';
+    $('#search-results').innerHTML = list.map(s => `<button class="search-result" data-session="${esc(s.id)}">${esc(title(s.research_goal))}<small>${date(s.created_at)} · ${sessionStatusLabel(s)} · ${s.hypothesis_count} 条假设</small></button>`).join('') || '<div class="empty-state">没有找到相关研究。</div>';
   }
   function setView(view) {
     if (!state.data && view !== 'research') return toast('选择一项研究后，即可查看相关资料');

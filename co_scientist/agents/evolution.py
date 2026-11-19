@@ -237,6 +237,11 @@ class EvolutionAgent(BaseAgent):
         record["parent_ids"] = parent_ids
 
         hid, was_new = await self._persist(session.id, record, strategy=strategy)
+        if not hid:
+            return None
+        stored = await hyp_repo.fetch(self.deps.db, hid)
+        if stored is not None and stored.state == "quarantined":
+            return None
         exact = hid == ids.hypothesis_id(session.id, f"evolution/{strategy}", record.get("statement") or record.get("title") or "")
         return hid if was_new or exact else None
 
@@ -288,8 +293,10 @@ class EvolutionAgent(BaseAgent):
         return await rev_repo.best_for_reasoning(self.deps.cfg, self.deps.db, hypothesis_id)
 
     async def _latest_feedback(self, session_id: str) -> str | None:
-        fb = await fb_repo.latest_system_feedback(self.deps.db, session_id)
-        return fb.text if fb is not None else None
+        text = await fb_repo.compose_prompt(
+            self.deps.db, session_id, limit_chars=self.deps.cfg.generation.feedback_chars,
+        )
+        return text or None
 
     async def _scientific_evidence_context(self, hypothesis_ids: list[str]) -> str:
         return await scientific_evidence_repo.render_for_agents(

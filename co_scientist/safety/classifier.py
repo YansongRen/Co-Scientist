@@ -20,6 +20,10 @@ from ..logging import get_logger
 log = get_logger("safety.classifier")
 
 
+class SafetyBlocked(RuntimeError):
+    """Research goal was classified into a blocked category."""
+
+
 Action = Literal["allow", "warn", "block", "quarantine"]
 
 # The schema lives with the other record_* tools so the MCP server can serve
@@ -104,8 +108,21 @@ class SafetyClassifier:
                 self._unavailable = True
         return self._provider
 
-    async def classify(self, text: str, *, label: str = "input") -> ClassifierResult:
-        """Always returns a result; degrades to benign + warning log on failure."""
+    async def classify(
+        self,
+        text: str,
+        *,
+        label: str = "input",
+        llm: Any = None,
+        session_id: str = "safety",
+        task_id: str | None = None,
+    ) -> ClassifierResult:
+        """Always returns a result; degrades to benign + warning log on failure.
+
+        Pass the session provider as `llm` so the call shares that session's
+        budget and transcripts. API backends put the tool payload on
+        `resp.raw.content`; CLI backends use `resp.capture`.
+        """
         if not self._cfg.safety.enable_classifier:
             return ClassifierResult(categories=["none"], confidence=0.0,
                                     rationale="classifier disabled")
@@ -114,7 +131,7 @@ class SafetyClassifier:
             return ClassifierResult(categories=["none"], confidence=1.0,
                                     rationale="empty input")
 
-        provider = self._get_provider()
+        provider = llm if llm is not None else self._get_provider()
         if provider is None:
             return ClassifierResult(categories=["none"], confidence=0.0,
                                     rationale="classifier backend unavailable")
@@ -133,7 +150,7 @@ class SafetyClassifier:
             max_output_tokens=512,
         )
         ctx = CallContext(
-            session_id="safety", task_id=None, agent="classifier", action="Classify",
+            session_id=session_id, task_id=task_id, agent="classifier", action="Classify",
         )
 
         try:
@@ -143,12 +160,25 @@ class SafetyClassifier:
             return ClassifierResult(categories=["none"], confidence=0.0,
                                     rationale=f"classifier_error: {e!s}")
 
-        for name, payload in (resp.capture.records if resp.capture else []):
-            if name == "record_safety_assessment":
-                return ClassifierResult(
-                    categories=list(payload.get("categories", ["none"])),
-                    confidence=float(payload.get("confidence", 0.0)),
-                    rationale=str(payload.get("rationale", "")),
-                )
-        return ClassifierResult(categories=["none"], confidence=0.0,
-                                rationale="no safety assessment recorded")
+        payload = _assessment_payload(resp)
+        if payload is None:
+            return ClassifierResult(categories=["none"], confidence=0.0,
+                                    rationale="no safety assessment recorded")
+        return ClassifierResult(
+            categories=list(payload.get("categories", ["none"])),
+            confidence=float(payload.get("confidence", 0.0)),
+            rationale=str(payload.get("rationale", "")),
+        )
+
+
+def _assessment_payload(resp: Any) -> dict[str, Any] | None:
+    for block in getattr(getattr(resp, "raw", None), "content", None) or []:
+        if getattr(block, "type", None) == "tool_use" and getattr(block, "name", "") == "record_safety_assessment":
+            payload = getattr(block, "input", None)
+            if isinstance(payload, dict):
+                return payload
+    capture = getattr(resp, "capture", None)
+    for name, payload in (capture.records if capture else []):
+        if name == "record_safety_assessment" and isinstance(payload, dict):
+            return payload
+    return None

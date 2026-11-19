@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -188,3 +188,44 @@ async def test_feedback_targeting(conn) -> None:
 
     targeted = await fb_repo.active_for_session(conn, s.id, target_id="hyp_keep_me")
     assert {f.kind for f in targeted} == {"directive", "pin"}
+
+    await fb_repo.insert(conn, SystemFeedback(
+        id=ids.feedback_id(), session_id=s.id, created_at=_now(),
+        source="human", kind="preference", target_id=None,
+        text="prefer cheaper assays", active=True,
+    ))
+    await fb_repo.insert(conn, SystemFeedback(
+        id=ids.feedback_id(), session_id=s.id, created_at=_now(),
+        source="human", kind="rejection", target_id="hyp_keep_me",
+        text="", active=True,
+    ))
+    t0 = _now()
+    await fb_repo.insert(conn, SystemFeedback(
+        id=ids.feedback_id(), session_id=s.id, created_at=t0,
+        source="meta_review", kind="system_feedback", target_id=None,
+        text="older meta", active=True,
+    ))
+    await fb_repo.insert(conn, SystemFeedback(
+        id=ids.feedback_id(), session_id=s.id, created_at=t0 + timedelta(seconds=1),
+        source="meta_review", kind="system_feedback", target_id=None,
+        text="latest meta", active=True,
+    ))
+    await fb_repo.insert(conn, SystemFeedback(
+        id=ids.feedback_id(), session_id=s.id, created_at=_now(),
+        source="human", kind="directive", target_id=None,
+        text="inactive note", active=False,
+    ))
+
+    global_prompt = await fb_repo.compose_prompt(conn, s.id)
+    assert "Researcher directive: focus on insulin signaling" in global_prompt
+    assert "Researcher preference: prefer cheaper assays" in global_prompt
+    assert "Meta-review: latest meta" in global_prompt
+    assert "older meta" not in global_prompt
+    assert "inactive note" not in global_prompt
+    assert "Researcher pin note" not in global_prompt
+    assert global_prompt.index("Researcher") < global_prompt.index("Meta-review")
+
+    targeted_prompt = await fb_repo.compose_prompt(conn, s.id, target_id="hyp_keep_me")
+    assert "Researcher pin note: pinned" in targeted_prompt
+    assert "Researcher rejection note" not in targeted_prompt
+    assert "inactive note" not in targeted_prompt

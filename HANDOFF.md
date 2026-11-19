@@ -155,3 +155,140 @@ Ranking 优先比较同一相似簇、嵌入更近的假设。至少两种策略
 `/login` 只提供登录和注册。打开页面时如果还没有管理员账号，会写入用户名 `rys`；这个用户名不能再被注册。管理员登录后进入 `/admin`，注册用户进入研究工作区。有账号之后，未登录访问工作区会回到登录页。密码以 PBKDF2 哈希存在 `accounts` 表。研究 API 没有因此改成多用户权限。
 
 验证：同一条单元测试命令为 **544 passed in 23.95s**。`git diff --check` 通过。隔离预览登录页只有登录和注册，没有并列的身份入口。
+
+## 阿里云更新准备（2026-11-18）
+
+维护者明确要求将个人仓库 `codex/cursor-handoff-20261110` 分支部署到原阿里云服务器，本次授权取代此前“暂不部署”的暂停约定。没有授权恢复历史失败任务或额外发起付费模型验证。
+
+- `git ls-remote handoff refs/heads/codex/cursor-handoff-20261110` 确认远程最新提交为 `2e943c8c7aeb5467a5112c3f2ab122bfc876e573`，与本地 HEAD 一致；开始时工作区干净。
+- 离线完整测试 **544 passed in 21.65s**；`pip check` 与 `git diff --check` 通过。
+- 从该提交用 `git archive` 生成临时部署包，SHA256 为 `7db860ebcb61269e746057a96dcc9b0166f76e72eb0bf1b5dd4cee5caef14cf6`，确认不含本地 `.env`、实际部署配置、虚拟环境或科研数据。临时包不是长期备份，可由上述提交重新生成。
+- Chrome 原有阿里云页面显示河源实例 `i-f8z6yzr8vjyd0am69xph` 处于节省停机状态、没有公网 IP；刷新后跳转到阿里云登录页。旧页面信息尚不能作为实时状态依据。已请维护者重新登录。
+- **尚未连接服务器、备份、迁移、上传或更新服务；部署未完成。** 登录恢复后先核实实例和原 `/opt/co-scientist`、`/data`，备份后再更新，保留服务器密钥与模型配置，不自动重跑旧任务。
+- 当前版本含固定默认管理员密码，研究 API 没有完整用户权限校验；登录页不能等同于已具备公共网站的访问控制。此次未修改账号或凭据。
+- 维护者随后完成阿里云重新登录。新标签页已显示账号及实例页面，页面被“ECS 专属安全防护权益”推广弹窗遮挡；没有开通推广服务。电脑控制接口多次报 `noWindowsAvailable`，按钮点击和键盘提交未产生预期页面变化，重连接口后仍未恢复。已请维护者保持 Mac 解锁、将 Chrome 置于前台并关闭弹窗。此时仍未连接或更新服务器，不能报告部署成功。
+
+## 阿里云更新完成（2026-11-18，Asia/Shanghai）
+
+本节取代上一节的未部署状态。维护者启动原实例后，实时控制台显示 `i-f8z6yzr8vjyd0am69xph` 运行正常，公网 IP 已变成 **47.115.224.185**。旧文档中的 `47.120.42.34` 不再作为当前访问地址。
+
+- Workbench 免密 SSH 返回“建立远程连接失败”；改用实例“全部操作 → 发送命令”的云助手。只读预检成功：原服务 active、服务用户 `coscientist`、源码 `/opt/co-scientist` 约 680 MB、数据 `/data` 约 7.8 MB。没有修改 SSH、安全组、云账号凭据或开通推广服务。
+- 固定提交的 GitHub codeload 归档 SHA256 为 `7e899ba294dd18dc3ca1c3b6dcbb8a1199470e8cc16658074a16b15ce00cf0cb`；本地逐一验证其 257 个文件与测试通过的 `2e943c8c7aeb5467a5112c3f2ab122bfc876e573` 一致。它与前文 `git archive` 的压缩包格式不同，校验值不能混用。
+- 自动输入长脚本出现字符丢失，未执行损坏的编辑内容。准备了更新脚本（本机临时文件 `co-scientist-update-2e943c8.sh` / `.txt`，SHA256 `e9ad9c339567aae2b7525e1af8580b46cbbd5eb4520209726794bb25db2eaf6f`，`bash -n` 通过），维护者随后手动粘贴并执行；已读取其截图及云助手成功输出，不重复执行。
+- 新代码位于 `/opt/co-scientist-releases/2e943c8c7aeb5467a5112c3f2ab122bfc876e573`。复用原 `.venv`，链接原服务器 `.env`，继续使用原 `config/deployment.toml` 与 `/data`。没有复制本地科研数据库或本地 Provider 密钥，没有启用本地多模型端点。
+- `pip check` 通过；在独立数据库副本上迁移至 schema 13、校验 SQLite integrity 与行数保留，输出 `MIGRATION_DRY_RUN_OK`，副本计数为 sessions 4、hypotheses 10、tasks 64、reviews 10。这些计数来自迁移预演，不是生产迁移后的逐行复核。
+- 停应用后备份数据与旧源码配置，存入服务器 `/var/backups/co-scientist-YYYYMMDD-HHMMSS/`，包含 `data.tar.gz`、`app.tar.gz`、原 systemd 单元及已有 drop-in（如有）、`SHA256SUMS`。此次未读到日志末尾的完整时间戳，因此不编造具体备份目录名。原源码目录和虚拟环境保留。
+- 新增 `/etc/systemd/system/co-scientist.service.d/90-codex-20261118.conf`，只覆盖 `WorkingDirectory` 和 `PYTHONPATH` 指向新 release；原 ExecStart/ExecStartPre 继续使用原虚拟环境和部署配置。重启时首次健康探测曾 connection refused，重试后成功；最终 `nginx -t` 通过，应用与 Nginx 均 active，日志显示正确的 `DEPLOYED_COMMIT`。这条启动窗口的连接失败不代表最终部署失败。
+
+19:50–19:51 公网实际验收：
+
+- `GET /healthz`：HTTP 200，`{"ok":true}`。
+- `GET /login`：HTTP 200，包含登录、注册表单；更新前该路径为 404。
+- 未登录 `GET /`：HTTP 303 → `/login`。
+- `GET /static/studio.js`：SHA256 `73681e35af3762f9166e27a57fc22b12ac70feaee31bf32bb4b530987f0c4f68`，与本地固定提交中的同一文件一致。
+- `GET /.env`：HTTP 404。
+- Chrome 已打开 `http://47.115.224.185/login`，实际看到“进入科研工作区”、登录与注册两个表单。
+
+此次完成版本更新、数据库副本迁移验证及上线可达性验收，没有发起模型推理、创建付费科研任务或重跑旧任务，也未执行公网账号登录/注册的完整提交流程。服务器原模型配置保留，但这不等于已验收真实科研闭环。
+
+当前依然是 HTTP 内测部署；源码中的固定默认管理员密码及研究 API 缺少完整用户权限校验的问题仍存在。本次没有将其描述为可面向公众使用的安全站点。后续维护以新 release 为源码入口，不能只修改仍保留的旧 `/opt/co-scientist/co_scientist` 后就认为线上代码已更新。
+
+## 上线后用户任务预算与多端点排查（2026-11-18）
+
+维护者提供 BudgetExceeded 截图并说明本机曾配置三个生成 API。只读检查其正在查看的线上 Session `ses_01M7Q91WTX9TXA6Y551W1HRG3E`：
+
+- 持久化总预算为 100000 tokens / 2 USD，已用 99773 tokens，程序估算费用 0.0494525 USD；仅余 227 tokens。Generation 的下一轮请求单是输出预留就为 8192 tokens，因此本地 `TokenBudget.admit` 会拒绝，调用不会进入 OpenAI-compatible SDK 的 HTTP 请求。
+- 实际保存了 15 条成功调用记录，模型全部为 `deepseek-flash`：parse_goal 1 次 / 2814 tokens，Generation 14 次 / 96959 tokens。没有 Kimi、GLM 调用记录；本次成功调用不能据此验证未使用的另外两把 Key。
+- 该 Session 配置快照中 `generation.authors=[]`、`generation.endpoints={}`、`llm.endpoints` 为空，各模型路由都为 DeepSeek。本机不入库的配置则为 authors `kimi, glm, session`，命名模型为 `kimi-k3.1-pro`、`glm-5.3`。此前更新按保留原服务器配置执行，没有同步本机三端点设置或相关秘密。
+- 错误提示存在软件问题：美元和 Token 两种上限共用同一条只显示美元的报错，造成“只用 $0.05 却提示 $2 耗尽”的误导；活动装饰器在预算准入前记录“请求模型”，不能把 BudgetExceeded 对应的请求事件当作已发到供应商。
+- 调度器把 BudgetExceeded 当普通任务失败重试；最终 Generation 失败 8 个、0 假设，其他研究 Agent 未触发，却被 session_done / 界面标记为已完成。该状态只代表流程结束，不代表取得科研产出。
+
+本轮是诊断，没有修改预算/配置/密钥/调度代码，没有重跑任务或发起模型请求。后续如要修复，应分别处理预算原因提示、预算不足时的重试/结束语义及服务器三端点配置，不能通过只更换 API Key 来解决该次 Token 准入失败。
+
+## 本机正式服务（2026-11-18）
+
+隔离预览 `7887` 会截获正式启动，因此在该页面新建的研究会一直保持「已暂停」。本机正式库原先停在 schema 8，打开带登录的正式服务时因缺少 `accounts` 表返回 500。
+
+- 已停止当时的本机 `serve`，备份为 `data/backups/co_scientist-before-accounts-20261118-203336.db`（504K，迁移前会话为 1 条 `done`）。
+- 已执行 `co-scientist init`，schema 现为 1–13；账号表当时为空，访问 `/login` 后才会写入默认管理员。没有重跑历史任务，也没有新建科研会话。
+- 正式服务在 `http://127.0.0.1:7879`。`GET /login` 为 200，未登录 `GET /` 为 303 到 `/login`。在这个地址新建研究会调用真实模型并消耗额度。
+
+## 共享文献阅读（2026-11-18）
+
+正式启动在生成假设之前，由会话模型（本机是 DeepSeek）做一次文献检索和阅读。Kimi、GLM 和 DeepSeek 之后只根据这份笔记写假设，生成阶段不再各自调用 PubMed 或 Europe PMC。笔记按 [norman-paper-reading](https://github.com/N-tongxue/norman-skill) v1.4.0 的 quick 模式组织：研究问题、核心设计、关键结果、证据缺口和下一步核对，并保留该技能要求的署名。该技能把文献综述定为快速阅读，完整逐图精读只用于指定的单篇论文，因此这里没有把每篇都做成 deep 报告，也没有把仓库里的本地 PDF 可执行文件放进版本库。正文仍来自现有 `read_paper`。审查阶段可以先用这份笔记，只在笔记没有覆盖的论断上再检索。2026-11-18 21:08 已重启本机 `http://127.0.0.1:7879`。重启前正在跑的研究会随旧进程停止；当时库里的会话随后均为 `done`。这次重启后新建的研究才会使用共享阅读。
+
+协作网络的红点原先只在「回放」里出现：运行中每 5 秒整页刷新会拆掉图，第一次载入又把已有交接记成历史。现在同一次研究的新交接会在运行中沿连线移动；打开页面时已有的交接仍不自动重放。
+
+## 运行可靠性（2026-11-18）
+
+维护者审查后要求先处理真实运行里的失败语义，线上登录保护暂缓。没有调用真实模型，没有改 `data/`。
+
+- **预算不足不再当普通失败重试。** `BudgetExceeded` 立即作废该任务并结束会话（`StopReason.BUDGET`）。Token 上限和美元上限使用不同的报错；`budget_tokens=0` 或 `budget_usd=0` 与调度侧一致，表示该项不限额。结束时把 `termination.reason/output/detail` 写入 `config_snapshot`。界面把 0 条假设的 `done` 显示为「已结束（无产出）」，预算停机显示为「已结束（预算用尽）」。
+- **命名生成端点默认 1 路并发。** `[llm.endpoints.<name>] max_concurrent` 默认 1，进程内共享信号量；0 表示不限制。会话 Provider 不受此项约束。
+- **审查分数接受 `"0.5"` 这类字符串。** 仍拒绝布尔值和区间外的数。
+- **网页进程可以接回研究。** `co-scientist serve` 启动时恢复 `status=running` 的会话。`POST /api/sessions/{id}/resume` 在当前进程没有 Supervisor 时会真正启动调度，而不是只改数据库。Resume 时若记录了 `n_initial` 却没有初始生成任务，会按幂等键补上；导入的会话没有该字段，不会凭空生成。
+
+验证：`OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 .venv/bin/python -m pytest -q co_scientist/tests/unit` 为 **560 passed in 24.13s**。`pip check`、`git diff --check` 和 `node --check co_scientist/web/static/studio.js` 通过。本机正式服务需要重启后才会加载这些改动；已经标记为 `done` 的历史会话不会被自动接回。
+
+未做：公网登录保护与 HTTPS、研究者反馈闭环、Meta-review 触发门槛、安全分类器、共享文献失败回退、固定目标的效果核对。Kimi `tool_choice`/`thinking` 的未提交修复仍未做真实调用验证。
+
+## 研究者反馈、Meta-review 触发与安全分类（2026-11-18）
+
+维护者要求继续论文对照的第三项。没有调用真实模型，没有改 `data/`。第一项（公网登录/HTTPS）仍由维护者部署时处理。
+
+- **Agent 读取研究者反馈。** `system_feedback` 里生效的 human `directive` / `preference`，以及带文字的 pin / rejection，会经 `compose_prompt` 写入 Generation、Reflection、Ranking、Evolution 和 Meta-review 提示。不再只看最新一条 meta-review。没有文字的 pin/reject 仍只改假设状态。`feedback_driven` 在只有研究者指令、还没有系统反馈时也会走该策略。
+- **标准模式 Meta-review 不再卡 50 场比赛。** `[metareview] feedback_every_matches` 默认 10；第一次可在 `min(every, max(2, 锦标赛池大小))` 场后触发，短局也能出系统反馈。`0` 关闭周期性反馈。轻量模式原有门槛未改。预估费用按同一间隔计算。
+- **安全分类器接到运行路径。** 研究目标在 parse_goal 之前分类；`block` 把 Session 标为 `failed` 并停止。假设在写入前分类：`block` 不入库，`quarantine` 写入 `quarantined` 且不进入审查。分类器关闭或后端失败时放行，不中断离线测试。API 后端从 `record_safety_assessment` 工具参数读取结果，CLI 后端仍读 `capture`。离线测试默认 `enable_classifier=False`，避免 RecordingLLM 多一次分类调用。
+
+验证：同一条单元测试命令为 **571 passed in 20.99s**。`pip check` 和 `git diff --check` 通过。没有调用真实模型，没有改 `data/`。
+
+未做：公网登录保护与 HTTPS、最终报告发布前的可选分类、共享文献失败回退、固定目标的效果核对。分类器的真实模型效果未验证。Kimi `tool_choice`/`thinking` 的未提交修复仍未做真实调用验证。
+
+## 共享文献回退、最终报告分类与效果核对清单（2026-11-18）
+
+维护者要求继续处理审查清单里剩余三项。没有调用真实模型，没有改 `data/`。公网登录/HTTPS 仍由维护者部署时处理。
+
+- **共享文献失败时退回各自检索。** 共享阅读未完成、没有论文，或没有笔记文件时，生成任务重新获得检索工具，不再被要求空引文硬写。成功的笔记对 literature/debate/assumption 仍是唯一文献来源，避免再次打爆检索站；`feedback_driven` 可以补搜笔记没覆盖的方向。共享阅读本身在有密钥时也会使用 `web_search`。`[literature] exclusive=true` 可改成 false，让所有策略都把共享笔记当补充。
+- **最终报告可选安全分类。** 在分类器开启且 `classify_final_overview=true` 时，总览草稿会再分类一次。`block` 不发布原稿，只留下说明；会话仍结束。`warn`/`quarantine` 发布并附标记。被隔离或否决的假设不再进入总览候选。离线测试默认关闭分类器。
+- **固定目标的效果核对清单。** `co-scientist scorecard SESSION_ID` 从已保存会话读取假设数、比赛数、完成的演化、系统反馈、后半段 Elo 是否高于前半段、结束原因，并留出 `human_score`。固定目标是「比较两种测量误差的可能来源」。Elo 仍不是实验结果。本轮没有按该协议发起付费运行。
+
+验证：同一条单元测试命令为 **577 passed in 21.79s**。`pip check` 和 `git diff --check` 通过。
+
+未做：公网登录保护与 HTTPS、按该协议用真实模型重复跑固定目标、分类器的真实模型效果。Kimi `tool_choice`/`thinking` 的未提交修复仍未做真实调用验证。
+
+## 固定目标协议实跑（2026-11-19）
+
+维护者明确要求按该协议用真实模型重复跑固定目标。没有改正式 `data/`，没有部署，没有用 Kimi/GLM 作者（三次之间只用会话 DeepSeek `deepseek-flash`，便于比较）。命令是：
+
+```sh
+.venv/bin/co-scientist protocol-run --data-dir docs/validation/quality-protocol-20261119
+```
+
+协议：目标「比较两种测量误差的可能来源」，轻量模式，3 条初始假设，2 美元 / 100000 tokens，时限 600 秒，重复 3 次。隔离库不入库。嵌入为本地 hash。
+
+三次都在 Token 上限停机，美元只用了约 0.03–0.06。共享文献阅读记在 supervisor 名下，单次约 4–9 万 tokens，把 10 万上限几乎用完，锦标赛、演化和 Meta-review 都没有跑起来。
+
+| 次序 | Session | 假设 | 比赛 | 演化完成 | 系统反馈 | 后半段 Elo 是否更高 | 结束 | tokens / USD |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | `ses_01M7S5XG238J5PB23Y686Z59HD` | 1（draft） | 0 | 0 | 0 | 无法判断 | 预算 | 90789 / 0.044 |
+| 2 | `ses_01M7S611Q1X6R7VSNFRAMRVB7D` | 0 | 0 | 0 | 0 | 无法判断 | 预算，无产出 | 92278 / 0.034 |
+| 3 | `ses_01M7S645YTRDZ4WQKQP4Q655B6` | 1（reviewed） | 0 | 0 | 0 | 无法判断 | 预算 | 97595 / 0.061 |
+
+`human_score` 仍为空：没有专家评分。Elo 仍不是实验结果。这次只能说明：在当前共享阅读 + 100000 token 上限下，固定目标跑不完比较循环。若要看后出现的假设是否压过早期假设，需要另开更高 token 上限或缩短共享阅读，不能把这次三次 `done` 当成科研效果通过。
+
+离线单元测试随后为 **578 passed in 26.27s**。`git diff --check` 通过。
+
+未做：公网登录保护与 HTTPS、在足够预算下重跑该目标、分类器的真实模型效果、人工评分。Kimi `tool_choice`/`thinking` 仍未做真实调用验证。
+
+## 管理员 API 管理（2026-11-19）
+
+维护者要求在管理员页增加 API 管理，方便后期更换或新增 API Key 和模型。没有调用真实模型，没有改正式 `data/`。
+
+- 管理员打开 `/admin` 可以看到密钥、会话 Provider/模型名、生成端点。普通用户仍只看到“只对管理员开放”。工作区侧栏对管理员多一个「管理」入口。
+- 密钥只写入 `data_dir/runtime.env`（权限 600），页面只显示是否已配置和末尾几位。模型、接口地址和作者写入 `data_dir/runtime.toml`，不含密钥。不会把本机 `.env` 整份拷进数据目录。
+- 进程内改的是同一个 Config 对象，新建研究会用新设置；已经在跑的研究会继续用启动时的配置。`load_config` 会叠加这两份 runtime 文件，重启后仍然有效。
+- 端点名、环境变量名、http(s) 地址会校验；作者必须是已有端点或 `session`。正在当作者的端点不能直接删除。
+
+验证：`OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 .venv/bin/python -m pytest -q co_scientist/tests/unit` 为 **581 passed in 25.21s**。`pip check` 和 `git diff --check` 通过。隔离预览 `http://127.0.0.1:7888` 用管理员 `rys` 登录后，能保存一把测试检索密钥（页面显示 `sk…cdef`，不回显全文），并新增生成端点 `demo` / `demo-flash`。预览已停，测试密钥只写在系统临时目录，没有写入正式 `data/`。2026-11-19 14:28 已重启本机正式服务 `http://127.0.0.1:7879`，该进程会加载管理员 API 管理页；在这个地址新建研究会调用真实模型。
+
+未做：公网登录保护与 HTTPS、在足够预算下重跑固定目标、分类器的真实模型效果。已在运行的 Supervisor 不会热切换新钥匙。

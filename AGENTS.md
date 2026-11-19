@@ -13,7 +13,7 @@
 - `co_scientist/agents/`：Supervisor 与 Generation、Reflection、Ranking、Evolution、Proximity、Meta-review。
 - `co_scientist/orchestrator/`：调度策略、Elo、终止和事件；`storage/`：SQLite 队列、迁移及 repositories；`vectors/`：embedding、FAISS 与准入去重。
 - `co_scientist/llm/`：Provider、CLI backend、工具循环、路由、预算及账目；`config/default.toml` 与 `config/prompts/`：默认配置及运行 Prompt。
-- `co_scientist/web/`：FastAPI、Jinja、原生 JavaScript/CSS、SSE。当前主界面是 Studio，旧界面在 `/classic`；本项目没有 Node 前端构建流程。
+- `co_scientist/web/`：FastAPI、Jinja、原生 JavaScript/CSS、SSE。当前主界面是 Studio，旧界面在 `/classic`；本项目没有 Node 前端构建流程。管理员 API 管理在 `/admin`：`web/admin_providers.py`、`ops_providers.py`，覆盖写入 `data_dir/runtime.toml` 与 `runtime.env`。
 - `co_scientist/scoping.py`、`web/scoping.py`：引导式研究；`inputs.py`、`web/inputs.py`：附件及提取。
 - `co_scientist/models/scientific_evidence.py`、`safety/evidence.py`：历史计算证据表与文献引文核查。当前没有蛋白质设计执行器。
 - `docs/generation-and-refinement.md`：生成与迭代机制；本机忽略目录 `docs/validation/` 保存历史运行记录，不随 clone 恢复；`deployment/` 与 `docs/deployment*.md`：部署模板和历史操作记录。

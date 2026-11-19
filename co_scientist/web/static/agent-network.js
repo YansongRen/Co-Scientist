@@ -3,11 +3,18 @@
   const NS='http://www.w3.org/2000/svg';
   const nodes={generation:[130,100,'Generation'],reflection:[400,60,'Reflection'],ranking:[670,100,'Ranking'],evolution:[670,310,'Evolution'],metareview:[400,350,'Meta-review'],proximity:[130,310,'Proximity'],supervisor:[400,205,'Supervisor']};
   const edges=[['generation','reflection'],['reflection','ranking'],['ranking','evolution'],['evolution','reflection'],['generation','proximity'],['evolution','proximity'],['metareview','generation'],['metareview','evolution'],['proximity','ranking']];
+  // Survives the agents panel being redrawn, so a refresh does not swallow a live handoff.
+  const memory=new Map();
+  function remembered(sid){
+    let item=memory.get(sid);
+    if(!item){item={seen:new Set(),ready:false,cursor:0};memory.set(sid,item);}
+    return item;
+  }
   function path(a,b){const [x,y]=nodes[a],[u,v]=nodes[b];return `M${x},${y} Q400,205 ${u},${v}`;}
   function element(tag,attrs){const e=document.createElementNS(NS,tag);for(const [k,v] of Object.entries(attrs)) e.setAttribute(k,v);return e;}
   function mount(host,sid){
     for(const t of host._timers||[])clearTimeout(t);
-    host.dataset.networkSession=sid;host._replaying=false; host._seen=new Set(); host._ready=false;host._timers=[];
+    host.dataset.networkSession=sid;host._replaying=false;host._timers=[];
     host.innerHTML='<section class="network-panel"><div class="network-heading"><strong>协作网络</strong><span><span class="network-status"></span> <button type="button" class="network-replay">回放</button></span></div><svg viewBox="0 0 800 410" role="group" aria-label="Agent 实时协作网络"></svg><div class="network-transfer" role="status"></div></section>';
     host.querySelector('.network-replay').addEventListener('click',()=>{
       if(host._replaying)return;
@@ -50,10 +57,15 @@
     host.querySelector('.network-replay').disabled=r.session_status==='running'||host._replaying||!host._records.length;
     const active=live?(r.execution?.active_agents||0):0;
     host.querySelector('.network-status').textContent=disconnected?'连接中断':live?`${active} 个 Agent 执行中`:(host._replaying?'历史回放':r.session_status==='paused'?'已暂停':'历史记录');
-    for(const e of r.handoffs||[]){if(!host._seen.has(e.id)&&host._ready&&live&&r.server_time-e.ts<8000)pulse(host,e);host._seen.add(e.id);}
-    // Initial history establishes a cursor, not fake live animation.
-    host._ready=true;
-    if(host._seen.size>240)host._seen=new Set((r.handoffs||[]).map(e=>e.id));
+    const mem=remembered(sid);
+    for(const e of r.handoffs||[]){
+      // The first snapshot only sets a cursor. Later unseen handoffs animate while the session is running.
+      if(mem.ready&&live&&!mem.seen.has(e.id)&&e.ts>=mem.cursor)pulse(host,e);
+      mem.seen.add(e.id);
+      if(e.ts>mem.cursor)mem.cursor=e.ts;
+    }
+    mem.ready=true;
+    if(mem.seen.size>240){mem.seen=new Set((r.handoffs||[]).map(e=>e.id));memory.set(sid,mem);}
     if(!live&&!host._replaying)host.querySelectorAll('.network-particle,.network-travel').forEach(e=>e.remove());
     if(!host.querySelector('.network-transfer').textContent)host.querySelector('.network-transfer').textContent=(r.handoffs||[]).length?'交接记录已载入':'尚无交接记录';
   }};

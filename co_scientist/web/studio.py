@@ -72,7 +72,9 @@ def create_studio_router(cfg: Config) -> APIRouter:
         conn = await db_mod.connect(cfg)
         try:
             async with conn.execute("""SELECT s.id,s.research_goal,s.status,s.created_at,s.updated_at,
-                (SELECT COUNT(*) FROM hypotheses h WHERE h.session_id=s.id) AS hypothesis_count
+                (SELECT COUNT(*) FROM hypotheses h WHERE h.session_id=s.id) AS hypothesis_count,
+                json_extract(s.config_snapshot, '$.termination.reason') AS stop_reason,
+                json_extract(s.config_snapshot, '$.termination.output') AS output
                 FROM sessions s ORDER BY s.created_at DESC LIMIT 50""") as cur:
                 return {"sessions": [dict(row) for row in await cur.fetchall()]}
         finally:
@@ -166,8 +168,16 @@ def create_studio_router(cfg: Config) -> APIRouter:
                 cost_usd,started_at,finished_at FROM transcripts WHERE session_id=?
                 ORDER BY started_at DESC LIMIT 50""", (session_id,)) as cur:
                 calls = [dict(r) for r in await cur.fetchall()]
-            return {"session": {key: value for key, value in session.model_dump(mode="json").items()
-                    if key != "config_snapshot"},
+            termination = session.config_snapshot.get("termination") or {}
+            public_session = {key: value for key, value in session.model_dump(mode="json").items()
+                    if key != "config_snapshot"}
+            public_session.update({
+                "stop_reason": termination.get("reason"),
+                "output": termination.get("output"),
+                "detail": termination.get("detail"),
+                "hypothesis_count": len(result_hypotheses),
+            })
+            return {"session": public_session,
                 "attachments": [public_file(cfg, row) for row in await list_files(conn, session.config_snapshot.get("web_launch", {}).get("upload_group_id"))],
                 "hypotheses": result_hypotheses, "sources": list(sources.values()),
                 "report": {"markdown": report, "html": render_markdown(report)},

@@ -48,7 +48,7 @@
     <button class="nav-item" data-action="library"><svg><use href="#i-book"/></svg><span>文献资料</span></button>
     <div class="history-heading"><span>研究记录</span><button class="icon-button small" aria-label="新建研究" data-action="new"><svg><use href="#i-plus"/></svg></button></div>
     <div class="session-list" id="session-list"><div class="sidebar-loading">正在读取研究记录…</div></div>
-    <div class="sidebar-bottom"><button class="profile" data-action="settings"><span class="avatar">{{ account.initial if account else "S" }}</span><span><strong>{{ account.username if account else "我的科研空间" }}</strong><small>{{ account.role_label if account else "未登录" }}</small></span><svg><use href="#i-settings"/></svg></button>{% if account %}<form method="post" action="/logout"><button class="nav-item" type="submit">退出登录</button></form>{% else %}<a class="nav-item" href="/login"><svg><use href="#i-arrow"/></svg><span>登录</span></a>{% endif %}</div>
+    <div class="sidebar-bottom"><button class="profile" data-action="settings"><span class="avatar">{{ account.initial if account else "S" }}</span><span><strong>{{ account.username if account else "我的科研空间" }}</strong><small>{{ account.role_label if account else "未登录" }}</small></span><svg><use href="#i-settings"/></svg></button>{% if account and account.role == "admin" %}<a class="nav-item" href="/admin">管理</a>{% endif %}{% if account %}<form method="post" action="/logout"><button class="nav-item" type="submit">退出登录</button></form>{% else %}<a class="nav-item" href="/login"><svg><use href="#i-arrow"/></svg><span>登录</span></a>{% endif %}</div>
   </aside>
 
   <main class="workspace">

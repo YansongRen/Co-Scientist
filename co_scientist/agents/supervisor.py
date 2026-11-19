@@ -27,7 +27,7 @@ import aiosqlite
 
 from .. import ids
 from ..config import Config
-from ..llm.budgets import TokenBudget
+from ..llm.budgets import BudgetExceeded, TokenBudget
 from ..llm.prompts import render
 from ..llm.provider import get_provider
 from ..llm.routing import route
@@ -120,6 +120,7 @@ class Supervisor:
                 llm = get_provider(self.cfg, db=llm_conn, budget=budget)
                 tools = ToolRegistry(self.cfg).discover()
                 deps = AgentDeps(cfg=self.cfg, db=conn, llm=llm, tools=tools)
+                await self._enforce_goal_safety(deps, session, preferences_text)
 
                 confirmed = session.config_snapshot.get("web_launch", {}).get("confirmed_brief")
                 if prepared_session_id and preferences_text and not confirmed:
@@ -130,6 +131,9 @@ class Supervisor:
                 session = await sess_repo.fetch(conn, session.id)
                 assert session is not None
 
+                if self.cfg.literature.enabled:
+                    from ..literature.shared import gather_shared_literature
+                    await gather_shared_literature(deps, session)
                 await self._enqueue_initial_generation(conn, session, n_initial)
             else:
                 session = await sess_repo.fetch(conn, resume_session_id)
@@ -152,6 +156,7 @@ class Supervisor:
                 llm = get_provider(self.cfg, db=llm_conn, budget=budget)
                 tools = ToolRegistry(self.cfg).discover()
                 deps = AgentDeps(cfg=self.cfg, db=conn, llm=llm, tools=tools)
+                await self._ensure_initial_generation(conn, session)
 
             tracker = StabilityTracker(
                 k=self.cfg.termination.elo_stability_k,
@@ -198,6 +203,36 @@ class Supervisor:
         if preferences_text:
             await fb_repo.insert(conn, _human_preference(s.id, preferences_text))
         return s
+
+    async def _enforce_goal_safety(
+        self, deps: AgentDeps, session: Session, preferences_text: str | None,
+    ) -> None:
+        from ..safety.classifier import SafetyBlocked, SafetyClassifier
+
+        if not self.cfg.safety.enable_classifier:
+            return
+        passage = session.research_goal
+        if preferences_text:
+            passage = f"{passage}\n\n{preferences_text}"
+        result = await SafetyClassifier(self.cfg).classify(
+            passage, label="research_goal", llm=deps.llm, session_id=session.id,
+        )
+        action = result.action(self.cfg)
+        await self._emit(deps.db, session.id, "safety_assessment", {
+            "label": "research_goal", "safety_action": action,
+            "categories": result.categories, "confidence": result.confidence,
+        })
+        if action == "block":
+            await sess_repo.set_status(deps.db, session.id, "failed")
+            await self._emit(deps.db, session.id, "safety_blocked", {
+                "label": "research_goal", "categories": result.categories,
+            })
+            raise SafetyBlocked("research goal blocked by safety classifier")
+        if action in ("warn", "quarantine"):
+            log.warning(
+                "goal_safety_flagged", session_id=session.id, action=action,
+                categories=result.categories,
+            )
 
     async def _parse_goal(
         self,
@@ -273,6 +308,7 @@ class Supervisor:
         last_reclaim_at = 0.0
         progress = asyncio.Event()
         progress.set()  # recover already-ready candidates after a process restart
+        budget_exhausted = asyncio.Event()
 
         async def _run_task(t: Task) -> None:
             # A transaction/cursor belongs to one worker, never to concurrent
@@ -322,6 +358,19 @@ class Supervisor:
                                        (datetime.now(UTC).isoformat(), t.id))
                     await conn.commit()
                     raise
+                except BudgetExceeded as e:
+                    error = safe_text(self.cfg, e, limit=2000)
+                    failure_status = await task_repo.fail(
+                        conn, t.id, error=error,
+                        max_attempts=self.cfg.lease.max_attempts, terminal=True,
+                    )
+                    log.error("task_budget_exceeded", err=error, kind=e.kind, task_id=t.id, action=t.action)
+                    await self._emit(conn, session.id, "task_failed",
+                                     {"task_id": t.id, "agent": t.agent, "action": t.action,
+                                      "attempt": t.attempts + 1, "status": failure_status,
+                                      "err": error[:300], "stop_reason": "budget"})
+                    budget_exhausted.set()
+                    return
                 except Exception as e:
                     error = safe_text(self.cfg, e, limit=2000)
                     failure_status = await task_repo.fail(conn, t.id, error=error,
@@ -355,6 +404,14 @@ class Supervisor:
                     # Wait until unpaused (or aborted).
                     await asyncio.sleep(1.0)
                     continue
+
+                if budget_exhausted.is_set():
+                    if inflight:
+                        for worker in inflight:
+                            worker.cancel()
+                        await asyncio.gather(*inflight, return_exceptions=True)
+                        inflight.clear()
+                    return StopReason.BUDGET
 
                 # Termination check (refreshes budget_used_* from the row)
                 if refreshed is not None:
@@ -589,6 +646,19 @@ class Supervisor:
                     priority=100, idempotency_key=f"{session.id}::generation::initial::{i}")))
             return inserted
 
+    async def _ensure_initial_generation(self, conn, session) -> int:
+        """Resume after a crash between parse_goal and the first enqueue.
+
+        Keys are idempotent, so a partial enqueue is completed rather than
+        skipped. Sessions without a recorded n_initial (imports) stay untouched.
+        """
+        n_initial = (session.config_snapshot.get("research_execution") or {}).get("n_initial")
+        if n_initial is None:
+            n_initial = (session.config_snapshot.get("web_launch") or {}).get("n_initial")
+        if not n_initial:
+            return 0
+        return await self._enqueue_initial_generation(conn, session, int(n_initial))
+
     def _remaining_budget(self, session):
         deadline = session.wall_deadline
         if deadline is not None and deadline.tzinfo is None:
@@ -809,6 +879,8 @@ class Supervisor:
             enqueued += inserted
             evolution_scheduled = bool(inserted)
 
+        from ..orchestrator.research_policy import meta_feedback_due
+
         mc = await tourney_repo.count_matches(conn, session.id)
         async with conn.execute(
             """SELECT COUNT(*) AS n FROM system_feedback
@@ -817,7 +889,10 @@ class Supervisor:
         ) as cur:
             row = await cur.fetchone()
         feedback_count = row["n"] if row else 0
-        if mc >= (feedback_count + 1) * 50:
+        if meta_feedback_due(
+            mc, feedback_count, pool_size=len(in_tournament),
+            every=self.cfg.metareview.feedback_every_matches,
+        ):
             inserted = await task_repo.enqueue(conn, Task(
                 id=ids.task_id(), session_id=session.id,
                 created_at=datetime.now(UTC),
@@ -912,6 +987,7 @@ class Supervisor:
     ) -> None:
         if stop_reason == StopReason.EXTERNAL:
             return  # a paused/aborted session must not be marked done by Meta-review
+        await self._record_termination(conn, session, stop_reason)
         n_cancel = await task_repo.cancel_pending_for_session(conn, session.id)
         if n_cancel:
             log.info("pending_cancelled", n=n_cancel)
@@ -945,6 +1021,17 @@ class Supervisor:
                     "task_id": final_task.id, "agent": "metareview",
                     "action": final_task.action, "kind": result.kind,
                 })
+            except BudgetExceeded as e:
+                error = safe_text(self.cfg, e, limit=2000)
+                log.error("final_overview_budget", err=error, kind=e.kind)
+                await task_repo.fail(conn, final_task.id, error=error,
+                                      max_attempts=self.cfg.lease.max_attempts, terminal=True)
+                await self._emit(conn, session.id, "task_failed", {
+                    "task_id": final_task.id, "agent": "metareview", "action": final_task.action,
+                    "err": error[:300], "status": "fallback", "stop_reason": "budget",
+                })
+                overview_path = await self._write_simple_overview(conn, session)
+                await sess_repo.set_final_overview(conn, session.id, overview_path)
             except Exception as e:
                 log.exception("final_overview_failed", err=str(e))
                 await task_repo.fail(conn, final_task.id, error=str(e),
@@ -968,8 +1055,37 @@ class Supervisor:
         if stop_reason != StopReason.EXTERNAL:
             await sess_repo.set_status(conn, session.id, "done")
 
-        await self._emit(conn, session.id, "session_done",
-                         {"stop_reason": stop_reason.value if stop_reason else None})
+        termination = (session.config_snapshot or {}).get("termination") or {}
+        await self._emit(conn, session.id, "session_done", {
+            "stop_reason": stop_reason.value if stop_reason else None,
+            "hypothesis_count": termination.get("hypothesis_count"),
+            "output": termination.get("output"),
+            "detail": termination.get("detail"),
+        })
+
+    async def _record_termination(self, conn, session, stop_reason: StopReason | None) -> None:
+        hyps = await hyp_repo.list_for_session(conn, session.id)
+        n = len(hyps)
+        reason = stop_reason.value if stop_reason else "unknown"
+        output = "none" if n == 0 else "partial" if reason == "budget" else "complete"
+        labels = {
+            "budget": "预算不足，已停止",
+            "idle": "没有更多可调度的任务",
+            "wall_clock": "到达运行时限",
+            "elo_stable": "排名已稳定",
+        }
+        detail = labels.get(reason, "研究结束")
+        if n == 0:
+            detail = f"{detail}；没有产生假设"
+        session.config_snapshot.setdefault("termination", {})
+        session.config_snapshot["termination"] = {
+            "reason": reason, "hypothesis_count": n, "output": output, "detail": detail,
+        }
+        await conn.execute(
+            "UPDATE sessions SET config_snapshot=?, updated_at=? WHERE id=?",
+            (json.dumps(session.config_snapshot), datetime.now(UTC).isoformat(), session.id),
+        )
+        await conn.commit()
 
     async def _write_simple_overview(
         self, conn: aiosqlite.Connection, session: Session

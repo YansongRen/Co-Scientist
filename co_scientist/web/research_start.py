@@ -78,16 +78,77 @@ async def prepare_research(conn, cfg, options, *, goal, preferences="", brief: R
     return session
 
 
+def config_for_resume(cfg, session):
+    """Rebuild the launch-time run knobs from the session snapshot."""
+    cfg = cfg.model_copy(deep=True)
+    run = session.config_snapshot.get("run") or {}
+    if "concurrency" in run:
+        cfg.run.concurrency = run["concurrency"]
+    if "research_mode" in run:
+        cfg.run.research_mode = run["research_mode"]
+    if "max_ideas" in run:
+        cfg.run.max_ideas = run["max_ideas"]
+    if "wall_clock_seconds" in run:
+        cfg.run.wall_clock_seconds = run["wall_clock_seconds"]
+    cfg.run.budget_usd = session.budget_usd
+    cfg.run.budget_tokens = session.budget_tokens
+    return cfg
+
+
 def schedule_research(app, cfg, options, session):
     """No startup on GET/save/generate; invoked only by explicit launch POSTs."""
     from ..agents.supervisor import Supervisor
 
+    async def runner():
+        await Supervisor(config_for_launch(cfg, options)).run_session(
+            goal=session.research_goal, prepared_session_id=session.id,
+            preferences_text=session.config_snapshot.get("web_launch", {}).get("preferences"),
+            n_initial=options.n_initial, wall_clock_seconds=options.wall_clock_seconds)
+
+    _spawn_supervisor(app, cfg, session, runner)
+
+
+def resume_research(app, cfg, session) -> bool:
+    """Start a Supervisor for an already-persisted session if one is not live."""
+    from ..agents.supervisor import Supervisor
+
+    runs = getattr(app.state, "background_runs", None)
+    if runs is None:
+        app.state.background_runs = {}
+        runs = app.state.background_runs
+    if session.id in runs:
+        return False
+
+    async def runner():
+        await Supervisor(config_for_resume(cfg, session)).run_session(
+            "", resume_session_id=session.id)
+
+    _spawn_supervisor(app, cfg, session, runner)
+    return True
+
+
+async def recover_running_research(app, cfg) -> int:
+    """Pick up sessions left `running` after the web process exited."""
+    conn = await db.connect(cfg)
+    started = 0
+    try:
+        async with conn.execute("SELECT id FROM sessions WHERE status='running'") as cur:
+            ids_ = [row[0] for row in await cur.fetchall()]
+        for sid in ids_:
+            session = await sessions.fetch(conn, sid)
+            if session is not None and resume_research(app, cfg, session):
+                started += 1
+    finally:
+        await conn.close()
+    if started:
+        log.info("recovered_running_sessions", n=started)
+    return started
+
+
+def _spawn_supervisor(app, cfg, session, runner):
     async def run():
         try:
-            await Supervisor(config_for_launch(cfg, options)).run_session(
-                goal=session.research_goal, prepared_session_id=session.id,
-                preferences_text=session.config_snapshot.get("web_launch", {}).get("preferences"),
-                n_initial=options.n_initial, wall_clock_seconds=options.wall_clock_seconds)
+            await runner()
         except Exception as exc:
             # Do not leak a Provider key, full configuration or research text.
             conn = await db.connect(cfg)

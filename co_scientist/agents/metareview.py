@@ -66,6 +66,9 @@ class MetaReviewAgent(BaseAgent):
         rationales = await tourney_repo.recent_rationales(self.deps.db, session.id, limit=50)
         debate_block = "\n\n---\n\n".join(rat[:1500] for rat in rationales if rat)
 
+        researcher_notes = await fb_repo.compose_prompt(
+            self.deps.db, session.id, limit_chars=self.deps.cfg.generation.feedback_chars,
+        )
         prompt = render(
             "metareview.system",
             goal=session.research_plan.objective,
@@ -74,6 +77,12 @@ class MetaReviewAgent(BaseAgent):
             debate_rationales=debate_block,
             sources=self._source_block(*(await self._hydrate_sources([], reviews))),
         )
+        if researcher_notes:
+            prompt += (
+                "\n\n# Researcher notes already on record\n"
+                + researcher_notes
+                + "\nIncorporate these as prior guidance. They are not experimental results."
+            )
         r = route(self.deps.cfg, "metareview", "system")
         spec = AgentCallSpec(
             route=r,
@@ -271,7 +280,10 @@ class MetaReviewAgent(BaseAgent):
             raise RuntimeError(f"session {task.session_id} missing")
 
         top = await hyp_repo.top_by_elo(self.deps.db, session.id, k=10)
-        all_hyps = await hyp_repo.list_for_session(self.deps.db, session.id)
+        all_hyps = [
+            h for h in await hyp_repo.list_for_session(self.deps.db, session.id)
+            if h.state not in ("rejected", "quarantined")
+        ]
         if not top and not all_hyps:
             return TaskResult(kind="noop", extra={"reason": "no hypotheses"})
         if not top:
@@ -312,7 +324,9 @@ class MetaReviewAgent(BaseAgent):
             )
         top_block = "\n\n---\n\n".join(chunks)
 
-        latest_fb = await fb_repo.latest_system_feedback(self.deps.db, session.id)
+        latest_fb = await fb_repo.compose_prompt(
+            self.deps.db, session.id, limit_chars=self.deps.cfg.generation.feedback_chars,
+        )
 
         all_reviews = [rv for group in reviews_by_hyp.values() for rv in group]
         hydrated_hyps, hydrated_reviews = await self._hydrate_sources(top, all_reviews)
@@ -323,7 +337,7 @@ class MetaReviewAgent(BaseAgent):
             "metareview.final",
             goal=session.research_plan.objective,
             preferences="; ".join(session.research_plan.preferences),
-            system_feedback=latest_fb.text if latest_fb else "",
+            system_feedback=latest_fb,
             top_hypotheses_block=top_block,
             sources=sources,
         )
@@ -356,10 +370,54 @@ class MetaReviewAgent(BaseAgent):
         diagnostics = await diversity.record(self.deps.cfg, self.deps.db, session.id)
         text += "\n\n" + suggest_contacts(records) + "\n"
         text += "\n\n" + diversity.render(diagnostics) + "\n"
+        text, safety_action = await self._publish_overview_safety(session, text)
         overview_path = await write_text(
             self.deps.cfg, session.id, "final", "overview", ".md", text
         )
         return TaskResult(
             kind="final_overview_generated",
-            extra={"overview_path": overview_path, "n_top": len(top)},
+            extra={
+                "overview_path": overview_path, "n_top": len(top),
+                "safety_action": safety_action,
+            },
         )
+
+    async def _publish_overview_safety(self, session, text: str) -> tuple[str, str]:
+        """Optional classifier on the draft overview. Does not fail the session."""
+        cfg = self.deps.cfg
+        if not cfg.safety.enable_classifier or not cfg.safety.classify_final_overview:
+            return text, "skipped"
+        from ..safety.classifier import SafetyClassifier
+        from ..storage.repos import events as events_repo
+
+        result = await SafetyClassifier(cfg).classify(
+            text, label="final_overview", llm=self.deps.llm, session_id=session.id,
+        )
+        action = result.action(cfg)
+        await events_repo.emit(
+            self.deps.db, session_id=session.id, task_id=None, agent="metareview",
+            event="safety_assessment",
+            payload={
+                "label": "final_overview", "safety_action": action,
+                "categories": result.categories, "confidence": result.confidence,
+            },
+        )
+        if action == "block":
+            await events_repo.emit(
+                self.deps.db, session_id=session.id, task_id=None, agent="metareview",
+                event="safety_blocked",
+                payload={"label": "final_overview", "categories": result.categories},
+            )
+            return (
+                "# Research overview\n\n"
+                "This overview was not published. The safety classifier blocked the draft. "
+                "The session still ended. This file is not a scientific record.\n",
+                "block",
+            )
+        if action in ("warn", "quarantine"):
+            text += (
+                "\n\n---\nSafety note: the classifier flagged this overview "
+                f"({action}; categories={', '.join(result.categories)}). "
+                "This is not an experimental result.\n"
+            )
+        return text, action

@@ -543,7 +543,7 @@ def serve(
 
     from .web.app import create_app
 
-    uvicorn.run(create_app(cfg), host=host, port=port, log_level="info")
+    uvicorn.run(create_app(cfg, recover_running=True), host=host, port=port, log_level="info")
 
 
 @app.command()
@@ -571,6 +571,62 @@ def eval_cmd(
     else:
         result = asyncio.run(run_all(cfg, offline=offline))
     console.print_json(data=result)
+
+
+@app.command("scorecard")
+def scorecard_cmd(
+    ctx: typer.Context,
+    session_id: str = typer.Argument(..., help="Persisted session id to summarize."),
+) -> None:
+    """Print an offline quality checklist for one session. No model calls."""
+    cfg, _ = ctx.obj
+    from .evals.scorecard import session_scorecard
+
+    async def _run():
+        conn = await db_mod.connect(cfg)
+        try:
+            return await session_scorecard(conn, session_id)
+        finally:
+            await conn.close()
+
+    card = asyncio.run(_run())
+    if card is None:
+        console.print(f"[red]No session {session_id}[/red]")
+        raise typer.Exit(1)
+    console.print_json(data=card)
+
+
+@app.command("protocol-run")
+def protocol_run(
+    ctx: typer.Context,
+    data_dir: Path = typer.Option(
+        ..., "--data-dir", help="Isolated data directory. Must not be the live data/ folder.",
+    ),
+    repeats: int | None = typer.Option(
+        None, "--repeats", min=1, max=10, help="Override protocol repeat count.",
+    ),
+) -> None:
+    """Run the fixed-goal quality protocol with real models.
+
+    Writes scorecards into `--data-dir`. Refuses the live `data/` directory.
+    """
+    cfg, _ = ctx.obj
+    _require_backend(cfg)
+    from .evals.scorecard import PROTOCOL, apply_protocol, run_protocol
+
+    live = cfg.data_dir.resolve()
+    isolated = data_dir.expanduser().resolve()
+    if isolated == live or live in isolated.parents or isolated in live.parents:
+        console.print("[red]Refuse to use the live data directory for protocol-run.[/red]")
+        raise typer.Exit(1)
+    protocol_cfg = apply_protocol(cfg, isolated)
+    console.print(
+        f"[dim]protocol-run goal={PROTOCOL['goal']!r} repeats={repeats or PROTOCOL['repeats']} "
+        f"mode={protocol_cfg.run.research_mode} budget_usd={protocol_cfg.run.budget_usd} "
+        f"budget_tokens={protocol_cfg.run.budget_tokens} data_dir={isolated}[/dim]"
+    )
+    summary = asyncio.run(run_protocol(protocol_cfg, repeats=repeats))
+    console.print_json(data=summary)
 
 
 @app.command("scientific-evidence-eval")

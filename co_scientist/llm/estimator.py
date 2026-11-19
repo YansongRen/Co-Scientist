@@ -71,7 +71,8 @@ def estimate(cfg: Config, *, max_ideas: int | None = None,
     n_matches = n_ideas * matches_per // 2  # each match counts for both sides
     n_evolutions = int(n_ideas * 0.4)
     # n_reviews is implicit in the rows below (full + verification per hypothesis).
-    n_meta_periodic = max(1, n_matches // 50)
+    every = cfg.metareview.feedback_every_matches
+    n_meta_periodic = max(1, n_matches // every) if every else 0
 
     rows = [
         CallEstimate(

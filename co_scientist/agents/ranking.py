@@ -35,6 +35,9 @@ from ..storage.repos import (
 )
 from ..storage.repos import scientific_evidence as scientific_evidence_repo
 from ..storage.repos import (
+    feedback as fb_repo,
+)
+from ..storage.repos import (
     sessions as sess_repo,
 )
 from ..storage.repos import (
@@ -354,6 +357,15 @@ class RankingAgent(BaseAgent):
             "scientific_evidence": scientific_evidence,
             "notes": "Be decisive. End your response with the line: better idea: <1 or 2>",
         }
+        researcher_notes = await fb_repo.compose_prompt(
+            self.deps.db, session.id, limit_chars=self.deps.cfg.generation.feedback_chars,
+        )
+        if researcher_notes:
+            prompt_kwargs["notes"] = (
+                prompt_kwargs["notes"]
+                + "\n\nResearcher and meta-review notes (not experimental results):\n"
+                + researcher_notes
+            )
         prompt = render(template, **prompt_kwargs)
         turns = self.deps.cfg.ranking.debate_turns if mode == "debate" else 1
         turns = max(1, min(int(turns), 4))

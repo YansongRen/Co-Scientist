@@ -26,6 +26,7 @@ from ..vectors import admission
 from ..vectors.embedder import make_embedder
 from .base import AgentDeps, BaseAgent
 from .dialogue import text_turns
+from ..literature.shared import generation_context, load_shared_literature
 from .generation_strategies import DIVERSITY, STRATEGIES, pool_context, resolve_strategy
 from .schemas import RECORD_HYPOTHESIS_TOOL
 
@@ -39,8 +40,9 @@ class GenerationAgent(BaseAgent):
         requested_strategy = task.payload.get("strategy", "literature")
         if task.payload.get("n", 1) != 1:
             raise ValueError("Each Generation task must request exactly one hypothesis")
-        feedback = await _latest_system_feedback(self.deps, task.session_id)
-        feedback = feedback[:self.deps.cfg.generation.feedback_chars] if feedback else None
+        feedback = await fb_repo.compose_prompt(
+            self.deps.db, task.session_id, limit_chars=self.deps.cfg.generation.feedback_chars,
+        ) or None
         strategy, fallback = resolve_strategy(requested_strategy, feedback)
         if fallback:
             log.warning("generation_strategy_fallback", requested=requested_strategy, effective=strategy)
@@ -53,16 +55,25 @@ class GenerationAgent(BaseAgent):
         plan = session.research_plan
 
         # 1. Render the prompt and run the tool loop with `record_hypothesis` available.
-        articles_block = (
-            "You will gather literature using the available tools (web_search, "
-            "pubmed_search, arxiv_search, europe_pmc_search, web_fetch, read_paper). "
-            "Search results are titles and abstracts. Before citing a paper, call read_paper "
-            "and use the methods, results, and discussion it returns. If reading_depth is not "
-            "full_text, do not describe methods or results you did not receive. "
-            "After you have read the papers you will cite, call `record_hypothesis` exactly once "
-            "with your proposed hypothesis.\n\n"
-            + NOVELTY_POLICY
+        shared_record = await load_shared_literature(self.deps.cfg, session.id)
+        shared_block, allow_search = generation_context(
+            shared_record, strategy=strategy,
+            exclusive=self.deps.cfg.literature.exclusive,
         )
+        if allow_search:
+            search_block = (
+                "You will gather literature using the available tools (web_search, "
+                "pubmed_search, arxiv_search, europe_pmc_search, web_fetch, read_paper). "
+                "Search results are titles and abstracts. Before citing a paper, call read_paper "
+                "and use the methods, results, and discussion it returns. If reading_depth is not "
+                "full_text, do not describe methods or results you did not receive. "
+                "After you have read the papers you will cite, call `record_hypothesis` exactly once "
+                "with your proposed hypothesis.\n\n"
+                + NOVELTY_POLICY
+            )
+            articles_block = (shared_block + "\n\n" if shared_block else "") + search_block
+        else:
+            articles_block = shared_block
 
         prompt = render(
             STRATEGIES[strategy].template,
@@ -73,11 +84,12 @@ class GenerationAgent(BaseAgent):
                 "Propose ONE hypothesis (the strongest you can justify) and "
                 "register it via the record_hypothesis tool. For each citation, label its "
                 "relation, support_level and study scope; include a verbatim excerpt "
-                "only when it was actually returned by a tool. Do not propose more "
+                "only when it was actually returned by a tool or the shared reading. Do not propose more "
                 "than one — additional hypotheses come from separate Generation calls. "
                 "You MUST end this task by calling record_hypothesis; do not keep "
-                "searching indefinitely. Budget your literature search to a handful "
-                "of queries, then commit."
+                + ("searching. The shared reading is the only literature for this hypothesis."
+                   if not allow_search else
+                   "searching indefinitely. Budget your literature search to a handful of queries, then commit.")
             ),
         )
         prompt += "\n\n# Existing pool (untrusted summaries)\n" + await pool_context(self.deps, session.id)
@@ -105,7 +117,8 @@ class GenerationAgent(BaseAgent):
             self.deps.cfg, task_id=task.id, batch_index=task.payload.get("batch_index"),
         )
         r = route(self.deps.cfg, "generation", strategy, endpoint=author)
-        tools = [*self.deps.tools.anthropic_tools_for("generation"), RECORD_HYPOTHESIS_TOOL]
+        tools = ([*self.deps.tools.anthropic_tools_for("generation"), RECORD_HYPOTHESIS_TOOL]
+                 if allow_search else [RECORD_HYPOTHESIS_TOOL])
 
         spec = AgentCallSpec(
             route=r,
@@ -148,17 +161,34 @@ class GenerationAgent(BaseAgent):
             raise RuntimeError("Generation did not call record_hypothesis")
 
         # 3. Validate every citation URL is in the union of URLs seen during the loop.
-        record["citations"] = _filter_to_seen_urls(record.get("citations", []), loop_result.seen_urls)
+        shared_urls = [paper.get("url") for paper in (shared_record or {}).get("papers") or []]
+        record["citations"] = _filter_to_seen_urls(
+            record.get("citations", []), loop_result.seen_urls if allow_search else shared_urls,
+        )
 
         annotate_record(record, loop_result)
         record["parent_ids"] = []  # Generation has no inherited hypotheses.
 
         # 4. Persist + embed + dedup-check.
         hid, was_new = await self._persist(session.id, record, strategy=strategy)
+        if not hid:
+            return TaskResult(
+                kind="noop",
+                extra={"requested_strategy": requested_strategy, "effective_strategy": strategy,
+                       "fallback_reason": fallback, "simulated_turns": len(turns),
+                       "reason": "hypothesis not admitted"},
+            )
         exact = hid == ids.hypothesis_id(session.id, f"generation/{strategy}", record.get("statement") or record.get("title") or "")
+        stored = await hyp_repo.fetch(self.deps.db, hid)
+        if stored is not None and stored.state == "quarantined":
+            return TaskResult(
+                kind="noop",
+                extra={"requested_strategy": requested_strategy, "effective_strategy": strategy,
+                       "fallback_reason": fallback, "simulated_turns": len(turns),
+                       "reason": "hypothesis quarantined", "hypothesis_id": hid},
+            )
         if not was_new and exact:
-            existing = await hyp_repo.fetch(self.deps.db, hid)
-            record = (await read_json(self.deps.cfg, existing.artifact_path))["record"]
+            record = (await read_json(self.deps.cfg, stored.artifact_path))["record"]
         return TaskResult(
             kind="hypothesis_created",
             hypothesis_ids=[hid] if was_new or exact else [],
@@ -275,8 +305,3 @@ def _build_session_context(goal: str, plan: ResearchPlan, sys_feedback_text: str
         f"- Constraints: {'; '.join(plan.constraints) or '(none)'}\n"
         f"{fb}"
     )
-
-
-async def _latest_system_feedback(deps: AgentDeps, session_id: str) -> str | None:
-    fb = await fb_repo.latest_system_feedback(deps.db, session_id)
-    return fb.text if fb is not None else None

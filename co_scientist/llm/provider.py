@@ -42,7 +42,9 @@ they are vendor model ids for the API providers and whatever the CLI's
 
 from __future__ import annotations
 
+import asyncio
 import shutil
+import threading
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
@@ -230,6 +232,28 @@ def get_provider(
     raise ValueError(f"unsupported LLM provider {name!r}")
 
 
+_endpoint_gates: dict[str, asyncio.Semaphore] = {}
+_endpoint_gate_lock = threading.Lock()
+
+
+def reset_endpoint_gates() -> None:
+    """Drop process-wide endpoint semaphores. Tests call this between cases."""
+    with _endpoint_gate_lock:
+        _endpoint_gates.clear()
+
+
+def endpoint_semaphore(name: str, limit: int) -> asyncio.Semaphore | None:
+    """One in-process gate per named endpoint so two sessions share the cap."""
+    if limit <= 0:
+        return None
+    with _endpoint_gate_lock:
+        gate = _endpoint_gates.get(name)
+        if gate is None:
+            gate = asyncio.Semaphore(limit)
+            _endpoint_gates[name] = gate
+        return gate
+
+
 class EndpointRouter:
     """Send a generation call to a named endpoint; everything else stays put."""
 
@@ -260,7 +284,12 @@ class EndpointRouter:
                 force_endpoint=True,
             )
             self._clients[name] = client
-        return await client.call(spec, ctx, est_input_tokens=est_input_tokens)
+        limit = self._cfg.llm.endpoints[name].max_concurrent
+        gate = endpoint_semaphore(name, limit)
+        if gate is None:
+            return await client.call(spec, ctx, est_input_tokens=est_input_tokens)
+        async with gate:
+            return await client.call(spec, ctx, est_input_tokens=est_input_tokens)
 
 
 def _with_endpoints(cfg, db, budget, retry_policy, provider: LLMProvider) -> LLMProvider:

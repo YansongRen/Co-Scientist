@@ -34,6 +34,16 @@ provider = "voyage"                  # voyage | openai | hash
 model = "voyage-3-large"
 dim = 1024
 
+# One session-model literature pass before authors write. A failed or empty
+# pass falls back to per-author search. exclusive=true keeps a successful
+# brief as the only literature for literature/debate/assumption;
+# feedback_driven may still search uncovered directions.
+[literature]
+enabled = true
+exclusive = true
+max_papers = 4
+max_iters = 8
+
 # Deterministic round-robin; repeating a strategy provides integer weights.
 [generation]
 strategies = ["literature", "debate", "assumption", "feedback_driven"]
@@ -211,8 +221,15 @@ provider = "local"
 local_cpu_seconds = 30
 local_mem_mb = 512
 
+[metareview]
+# Standard-mode self-improvement used to wait for 50 matches, so small
+# budgets never produced Meta-review feedback. 10 is enough for a short
+# tournament; 0 disables periodic feedback. Lightweight mode is unchanged.
+feedback_every_matches = 10
+
 [safety]
 enable_classifier = true
+classify_final_overview = true
 enable_citation_verifier = true
 classifier_block_categories = ["cbrn", "csam", "weapons", "illicit_synthesis"]
 classifier_warn_categories = ["dual_use_bio"]
@@ -253,6 +270,9 @@ classifier_warn_categories = ["dual_use_bio"]
 # sent to OpenRouter and rejected — unset it, or set only the preset's key.
 [llm]
 provider = "openrouter"
+# Named generation endpoints ([llm.endpoints.<name>]) default to
+# max_concurrent = 1. Set 0 to allow unlimited in-flight calls. The
+# session provider is not gated by this field.
 
 [llm.claude_cli]
 binary = "claude"

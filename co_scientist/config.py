@@ -1,7 +1,8 @@
 """Configuration loader.
 
-Layered: config/default.toml → ~/.co-scientist/config.toml → ./co-scientist.toml → env.
-Secrets come from environment variables only.
+Layered: config/default.toml → ~/.co-scientist/config.toml → ./co-scientist.toml
+→ extra_path → data_dir/runtime.toml → data_dir/runtime.env → env.
+Secrets come from environment variables and the admin-managed runtime.env.
 """
 
 from __future__ import annotations
@@ -252,8 +253,16 @@ class CodeExecCfg(BaseModel):
     local_mem_mb: int = 512
 
 
+class MetaReviewCfg(BaseModel):
+    """Periodic system-feedback in standard mode. Lightweight has its own gate."""
+
+    feedback_every_matches: int = Field(10, ge=0, le=500)
+    """Enqueue GenerateSystemFeedback every N completed matches. 0 disables it."""
+
+
 class SafetyCfg(BaseModel):
     enable_classifier: bool = True
+    classify_final_overview: bool = True
     enable_citation_verifier: bool = True
     classifier_block_categories: list[str] = Field(
         default_factory=lambda: ["cbrn", "csam", "weapons", "illicit_synthesis"]
@@ -343,6 +352,11 @@ class EndpointCfg(BaseModel):
     base_url: str
     model: str
     api_key_env: str
+    max_concurrent: int = Field(1, ge=0)
+    """In-flight HTTP calls on this endpoint. 0 means unlimited.
+
+    Consumer APIs such as Kimi often admit only one request at a time.
+    The session provider is not gated by this field."""
 
 
 class LLMCfg(BaseModel):
@@ -448,6 +462,21 @@ class ScopingCfg(BaseModel):
     output_tokens: int = Field(2400, ge=256, le=6000)
 
 
+class LiteratureCfg(BaseModel):
+    """One shared literature pass before hypothesis authors start writing.
+
+    The session model searches and reads. A ready brief is the default
+    literature for literature/debate/assumption when `exclusive` is true.
+    A failed or empty pass always falls back to per-author search.
+    `feedback_driven` may still search uncovered directions.
+    """
+
+    enabled: bool = True
+    exclusive: bool = True
+    max_papers: int = Field(4, ge=1, le=8)
+    max_iters: int = Field(8, ge=2, le=16)
+
+
 class UploadsCfg(BaseModel):
     max_file_bytes: int = Field(10 * 1024 * 1024, ge=1024)
     max_group_bytes: int = Field(30 * 1024 * 1024, ge=1024)
@@ -477,11 +506,13 @@ class Config(BaseModel):
     web_search: WebSearchCfg = Field(default_factory=WebSearchCfg)
     web_fetch: WebFetchCfg = Field(default_factory=WebFetchCfg)
     code_exec: CodeExecCfg = Field(default_factory=CodeExecCfg)
+    metareview: MetaReviewCfg = Field(default_factory=MetaReviewCfg)
     safety: SafetyCfg = Field(default_factory=SafetyCfg)
     llm: LLMCfg = Field(default_factory=LLMCfg)
     web_ui: WebUICfg = Field(default_factory=WebUICfg)
     scoping: ScopingCfg = Field(default_factory=ScopingCfg)
     uploads: UploadsCfg = Field(default_factory=UploadsCfg)
+    literature: LiteratureCfg = Field(default_factory=LiteratureCfg)
     secrets: Secrets = Field(default_factory=Secrets)
 
     @property
@@ -521,7 +552,7 @@ def _read_toml(path: Path) -> dict[str, Any]:
 
 
 def load_config(extra_path: Path | None = None) -> Config:
-    """Layered load: default.toml → ~/.co-scientist/config.toml → ./co-scientist.toml → extra_path → env."""
+    """Layered load: default.toml → ~/.co-scientist/config.toml → ./co-scientist.toml → extra_path → runtime overlay → env."""
     merged: dict[str, Any] = _read_toml(DEFAULT_CONFIG)
 
     for p in (
@@ -533,7 +564,8 @@ def load_config(extra_path: Path | None = None) -> Config:
             merged = _deep_merge(merged, _read_toml(p))
 
     cfg = Config.model_validate(merged)
-    # secrets pulled from env via Secrets() — already wired by default_factory above
+    from .ops_providers import apply_ops_overlay
+    apply_ops_overlay(cfg)
     return cfg
 
 

@@ -3,9 +3,28 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, BeforeValidator, Field
+
+
+def _coerce_score(value: Any) -> Any:
+    """Models often emit scores as `"0.5"`; keep 0–1 numeric validation."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise ValueError("score must be a number")
+    if isinstance(value, str):
+        value = value.strip()
+        if value == "":
+            return None
+        value = float(value)
+    elif isinstance(value, int):
+        value = float(value)
+    return value
+
+
+Score = Annotated[float | None, BeforeValidator(_coerce_score)]
 
 ReviewKind = Literal["initial", "full", "verification", "observation", "simulation", "recurrent"]
 ReviewVerdict = Literal[
@@ -35,10 +54,10 @@ class AssumptionCheck(BaseModel):
 
 
 class ReviewScores(BaseModel):
-    novelty: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False, strict=True)
-    correctness: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False, strict=True)
-    testability: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False, strict=True)
-    feasibility: float | None = Field(default=None, ge=0, le=1, allow_inf_nan=False, strict=True)
+    novelty: Score = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    correctness: Score = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    testability: Score = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    feasibility: Score = Field(default=None, ge=0, le=1, allow_inf_nan=False)
 
 
 class Review(BaseModel):

@@ -145,6 +145,9 @@ async def publish(agent, sid, record, strategy, render_md, citations):
     if not isinstance(statement, str) or not statement.strip():
         raise ValueError("record_hypothesis: missing statement")
     hid = ids.hypothesis_id(sid, f"{origin}/{strategy}", statement)
+    safety_state = await _hypothesis_safety(agent, sid, statement)
+    if safety_state == "block":
+        return None, False
     async with entity_lock(agent.deps.cfg, sid, POOL_LOCK):
         if await hypotheses.fetch(agent.deps.db, hid):
             return hid, False
@@ -156,7 +159,7 @@ async def publish(agent, sid, record, strategy, render_md, citations):
         h = Hypothesis(id=hid, session_id=sid, created_at=datetime.now(UTC), created_by=origin,
             strategy=strategy, parent_ids=record.get("parent_ids") or [], title=record.get("title", "")[:300],
             summary=statement[:1000], full_text=render_md(record), citations=citations,
-            artifact_path="pending", state="draft")
+            artifact_path="pending", state="quarantined" if safety_state == "quarantine" else "draft")
         duplicate, payload = await agent._dedup_query(sid, embedding_text(h))
         if duplicate and duplicate != hid and agent.deps.cfg.vectors.mark_duplicates:
             await note(agent.deps, sid, "hypothesis_dedup_blocked", candidate_id=hid,
@@ -177,3 +180,23 @@ async def publish(agent, sid, record, strategy, render_md, citations):
                 await note(agent.deps, sid, "embedding_commit_failed", hypothesis_id=hid,
                            error_type=type(exc).__name__, repair_on_next_query=True)
         return hid, inserted
+
+
+async def _hypothesis_safety(agent, sid, statement) -> str:
+    """`allow`, `warn`, `quarantine`, or `block`. Fail-open when disabled."""
+    if not agent.deps.cfg.safety.enable_classifier:
+        return "allow"
+    from ..safety.classifier import SafetyClassifier
+
+    result = await SafetyClassifier(agent.deps.cfg).classify(
+        statement, label="hypothesis", llm=getattr(agent.deps, "llm", None),
+        session_id=sid,
+    )
+    action = result.action(agent.deps.cfg)
+    await note(agent.deps, sid, "safety_assessment", label="hypothesis",
+               safety_action=action, categories=result.categories,
+               confidence=result.confidence)
+    if action == "block":
+        await note(agent.deps, sid, "hypothesis_safety_blocked",
+                   categories=result.categories, origin=agent.name)
+    return action

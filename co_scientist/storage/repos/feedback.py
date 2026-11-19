@@ -48,6 +48,52 @@ async def active_for_session(
     return [_row_to_fb(r) for r in rows]
 
 
+_PROMPT_LABELS = {
+    ("human", "directive"): "Researcher directive",
+    ("human", "preference"): "Researcher preference",
+    ("human", "pin"): "Researcher pin note",
+    ("human", "rejection"): "Researcher rejection note",
+    ("meta_review", "system_feedback"): "Meta-review",
+}
+
+
+async def compose_prompt(
+    conn: aiosqlite.Connection,
+    session_id: str,
+    *,
+    target_id: str | None = None,
+    limit_chars: int = 4000,
+) -> str:
+    """Active researcher notes plus the latest meta-review, for agent prompts.
+
+    Pin/rejection without text stay state changes only. Directives and
+    preferences are injected even when no meta-review exists yet.
+    """
+    rows = await active_for_session(conn, session_id, target_id=target_id)
+    human: list[str] = []
+    meta: str | None = None
+    for fb in rows:
+        text = (fb.text or "").strip()
+        if not text:
+            continue
+        label = _PROMPT_LABELS.get((fb.source, fb.kind))
+        if label is None:
+            continue
+        line = f"- {label}: {text}"
+        if fb.source == "meta_review":
+            if meta is None:
+                meta = line
+            continue
+        human.append(line)
+    parts = human
+    if meta:
+        parts.append(meta)
+    if not parts:
+        return ""
+    body = "\n".join(parts)
+    return body[:limit_chars]
+
+
 async def latest_system_feedback(
     conn: aiosqlite.Connection, session_id: str
 ) -> SystemFeedback | None:

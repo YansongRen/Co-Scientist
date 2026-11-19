@@ -21,6 +21,21 @@ async def eligible_pairs(conn, session_id, candidates, *, pair_cap=3, idea_cap=1
         sorted((pair[0].id, pair[1].id))))
 
 
+def meta_feedback_due(match_count: int, feedback_count: int, *, pool_size: int, every: int) -> bool:
+    """Whether standard-mode idle should enqueue another Meta-review pass.
+
+    `every <= 0` disables periodic feedback. The first pass can fire earlier
+    on a small tournament so a short run is not stuck waiting for 50 matches.
+    """
+    if every <= 0 or match_count <= 0:
+        return False
+    if match_count >= (feedback_count + 1) * every:
+        return True
+    if feedback_count == 0:
+        return match_count >= min(every, max(2, pool_size))
+    return False
+
+
 async def pool_revision(conn, session_id, hypotheses):
     """Evolution/feedback run once per candidate pool and review revision."""
     async with conn.execute("SELECT id,body FROM reviews WHERE session_id=? ORDER BY id",

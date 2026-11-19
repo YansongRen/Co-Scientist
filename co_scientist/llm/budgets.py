@@ -13,7 +13,15 @@ from ..config import Config
 
 
 class BudgetExceeded(Exception):
-    """Raised by `BudgetGuard.admit` when no headroom remains."""
+    """Raised by `TokenBudget.admit` when no headroom remains.
+
+    `kind` is `tokens`, `usd`, or `agent` so callers can stop the session
+    without retrying and the UI can name the actual cap.
+    """
+
+    def __init__(self, message: str, *, kind: str = "usd") -> None:
+        super().__init__(message)
+        self.kind = kind
 
 
 @dataclass
@@ -75,25 +83,50 @@ class TokenBudget:
         """Block-style admission: raise BudgetExceeded if we can't afford this call."""
         async with self._lock:
             ctr = self._per_agent.setdefault(agent, _Counter())
-            # Session-wide cap first (includes reserve)
-            if (
-                self._global.used_tokens + self._global.reserved_tokens + est_tokens
+            # Session-wide cap first (includes reserve). A zero cap means unlimited,
+            # matching `_remaining_budget` / `budget_exceeded`.
+            token_over = (
+                self.budget_tokens > 0
+                and self._global.used_tokens + self._global.reserved_tokens + est_tokens
                 > self.budget_tokens
-            ) or (
-                self._global.used_usd + self._global.reserved_usd + est_usd
+            )
+            usd_over = (
+                self.budget_usd > 0
+                and self._global.used_usd + self._global.reserved_usd + est_usd
                 > self.budget_usd
-            ):
+            )
+            if token_over and not usd_over:
                 raise BudgetExceeded(
-                    f"session budget exhausted (used_usd={self._global.used_usd:.2f},"
-                    f" reserved={self._global.reserved_usd:.2f}, cap={self.budget_usd:.2f})"
+                    "session token budget exhausted "
+                    f"(used_tokens={self._global.used_tokens},"
+                    f" reserved={self._global.reserved_tokens},"
+                    f" need={est_tokens}, cap={self.budget_tokens})",
+                    kind="tokens",
+                )
+            if usd_over and not token_over:
+                raise BudgetExceeded(
+                    "session USD budget exhausted "
+                    f"(used_usd={self._global.used_usd:.4f},"
+                    f" reserved={self._global.reserved_usd:.4f},"
+                    f" need={est_usd:.4f}, cap={self.budget_usd:.4f})",
+                    kind="usd",
+                )
+            if token_over and usd_over:
+                raise BudgetExceeded(
+                    "session budget exhausted "
+                    f"(used_tokens={self._global.used_tokens}/{self.budget_tokens},"
+                    f" used_usd={self._global.used_usd:.4f}/{self.budget_usd:.4f})",
+                    kind="usd",
                 )
             # Per-agent share (skip for never-degrade agents — caller passes 'metareview_final'
             # via the same agent='metareview' key, but the reserve covers it).
             cap_usd = self.share_usd(agent) + self.cfg.budget_shares.reserve * self.budget_usd / 2
-            if ctr.used_usd + ctr.reserved_usd + est_usd > cap_usd:
+            if self.budget_usd > 0 and ctr.used_usd + ctr.reserved_usd + est_usd > cap_usd:
                 raise BudgetExceeded(
-                    f"agent {agent!r} share exhausted (used={ctr.used_usd:.2f},"
-                    f" reserved={ctr.reserved_usd:.2f}, share={cap_usd:.2f})"
+                    f"agent {agent!r} USD share exhausted "
+                    f"(used={ctr.used_usd:.4f}, reserved={ctr.reserved_usd:.4f},"
+                    f" share={cap_usd:.4f})",
+                    kind="agent",
                 )
             ctr.reserved_tokens += est_tokens
             ctr.reserved_usd += est_usd

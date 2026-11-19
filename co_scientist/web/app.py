@@ -29,6 +29,7 @@ from sse_starlette.sse import EventSourceResponse
 from .. import ids
 from .. import inputs as user_inputs
 from ..config import Config, load_config
+from ..ops_providers import snapshot as providers_snapshot
 from ..logging import get_logger
 from ..models import SystemFeedback
 from ..orchestrator.events import GLOBAL_BUS
@@ -39,13 +40,14 @@ from ..storage.repos import hypotheses as hyp_repo
 from ..storage.repos import reviews as rev_repo
 from ..storage.repos import sessions as sess_repo
 from ..storage.repos import transcripts as tx_repo
+from .admin_providers import admin_flash, create_admin_providers_router
 from .auth import (
     COOKIE, MAX_AGE, account_by_username, current_account, insert_account,
     ADMIN_USERNAME, ensure_admin, list_accounts, sign_account, validate_password,
     validate_username, verify_password,
 )
 from .inputs import InputBodyLimit, create_inputs_router
-from .research_start import LaunchOptions, prepare_research, schedule_research
+from .research_start import LaunchOptions, prepare_research, resume_research, schedule_research
 from .sanitize import render_markdown
 from .scoping import create_scoping_router
 from .studio import create_studio_router
@@ -55,9 +57,17 @@ HERE = Path(__file__).parent
 TEMPLATES = Jinja2Templates(directory=HERE / "templates")
 
 
-def create_app(cfg: Config | None = None) -> FastAPI:
+def create_app(cfg: Config | None = None, *, recover_running: bool = False) -> FastAPI:
     cfg = cfg or load_config()
-    app = FastAPI(title="AI Co-Scientist")
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        if recover_running:
+            from .research_start import recover_running_research
+            await recover_running_research(_app, cfg)
+        yield
+
+    app = FastAPI(title="AI Co-Scientist", lifespan=lifespan)
     app.state.cfg = cfg
     app.state.background_runs: dict[str, asyncio.Task] = {}
     app.add_middleware(InputBodyLimit, max_bytes=cfg.uploads.max_group_bytes + 1024 * 1024)
@@ -67,6 +77,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     app.include_router(create_studio_router(cfg))
     app.include_router(create_scoping_router(cfg))
     app.include_router(create_inputs_router(cfg))
+    app.include_router(create_admin_providers_router(cfg))
 
     @app.get("/login", response_class=HTMLResponse)
     async def login_page(request: Request) -> HTMLResponse:
@@ -152,6 +163,8 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             return TEMPLATES.TemplateResponse(request, "admin.html", {
                 "forbidden": False, "account": account,
                 "accounts": await list_accounts(conn), "session_count": session_count,
+                "providers": providers_snapshot(cfg),
+                **admin_flash(request),
             })
         finally:
             await conn.close()
@@ -344,12 +357,17 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             await conn.close()
 
     @app.post("/api/sessions/{session_id}/resume")
-    async def api_resume(session_id: str) -> JSONResponse:
+    async def api_resume(request: Request, session_id: str) -> JSONResponse:
         conn = await db_mod.connect(cfg)
         try:
+            session = await sess_repo.fetch(conn, session_id)
+            if session is None:
+                raise HTTPException(status_code=404)
             await sess_repo.set_status(conn, session_id, "running")
+            session = await sess_repo.fetch(conn, session_id)
+            started = resume_research(request.app, cfg, session)
             await GLOBAL_BUS.publish(session_id, "session_resumed", {})
-            return JSONResponse({"ok": True})
+            return JSONResponse({"ok": True, "supervisor": "started" if started else "already_running"})
         finally:
             await conn.close()
 

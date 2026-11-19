@@ -7,7 +7,7 @@
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='10' fill='%23202020'/%3E%3Cpath d='M10 10h12v12H10zM6 16h20M16 6v20' stroke='white' fill='none' stroke-width='1.5'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/static/studio.css">
 </head>
-<body class="login-page">
+<body class="login-page admin-page">
   <main class="login-shell">
     <a class="brand login-brand" href="/" aria-label="Co-Scientist 首页"><span class="brand-mark"><i></i><i></i><i></i><i></i></span><strong>Co-Scientist</strong></a>
     {% if forbidden %}
@@ -18,13 +18,14 @@
     {% else %}
     <p class="empty-eyebrow">管理员</p>
     <h1>{{ account.username }}</h1>
-    <p class="login-lead">这里列出本机登录账号和研究数量。进入工作区后，研究流程与普通用户相同。</p>
+    <p class="login-lead">这里列出本机登录账号，也可以更换接口密钥、会话模型和生成端点。密钥不会出现在页面或 toml 里。</p>
     <div class="login-metrics">
       <div><strong>{{ accounts|length }}</strong><span>登录账号</span></div>
       <div><strong>{{ session_count }}</strong><span>研究记录</span></div>
     </div>
     <div class="login-actions">
       <a class="primary-button login-inline" href="/">进入研究工作区</a>
+      <a class="secondary-button" href="#providers">API 管理</a>
       <form method="post" action="/logout"><button class="secondary-button" type="submit">退出登录</button></form>
     </div>
     <h2 class="login-list-title">账号</h2>
@@ -33,6 +34,116 @@
       <li><strong>{{ row.username }}</strong><span>{{ row.role_label }}</span><time>{{ row.created_at[:16] }}</time></li>
       {% endfor %}
     </ul>
+
+    <section class="admin-section" id="providers">
+      <h2 class="login-list-title">API 管理</h2>
+      <p class="login-lead">{{ providers.note }} 当前会话 Provider 读取 {{ providers.session_key_env or "无需密钥" }}。</p>
+      {% if admin_notice %}<p class="admin-flash" role="status">{{ admin_notice }}</p>{% endif %}
+      {% if admin_error %}<p class="login-error" role="alert">{{ admin_error }}</p>{% endif %}
+
+      <div class="login-card admin-card">
+        <small>密钥</small>
+        <h2>更换或新增 API Key</h2>
+        <p>只保存你在这里提交的钥匙，不会把本机 `.env` 整份拷进数据目录。页面只显示是否已配置和末尾几位。</p>
+        <ul class="admin-key-list">
+          {% for key in providers.api_keys %}
+          <li><code>{{ key.name }}</code><span>{% if key.configured %}已配置 {{ key.preview }}{% else %}未配置{% endif %}</span></li>
+          {% endfor %}
+        </ul>
+        <form method="post" action="/admin/providers/keys" autocomplete="off">
+          <label>环境变量名
+            <input name="name" list="known-keys" required placeholder="OPENAI_API_KEY">
+          </label>
+          <datalist id="known-keys">
+            {% for key in providers.api_keys %}
+            <option value="{{ key.name }}"></option>
+            {% endfor %}
+          </datalist>
+          <label>新密钥
+            <input name="value" type="password" autocomplete="new-password" placeholder="留空则清除这把钥匙">
+          </label>
+          <button class="primary-button" type="submit">保存密钥</button>
+        </form>
+      </div>
+
+      <div class="login-card admin-card">
+        <small>会话模型</small>
+        <h2>Provider 与模型名</h2>
+        <p>审查、比较、演化和报告使用这里的会话模型。更换 Provider 后请核对这些模型名是否属于同一家。</p>
+        <form method="post" action="/admin/providers/session">
+          <div class="admin-form-grid">
+            <label>Provider
+              <select name="provider">
+                {% for name in providers.providers %}
+                <option value="{{ name }}" {% if name == providers.provider %}selected{% endif %}>{{ name }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>接口地址
+              <input name="base_url" value="{{ providers.base_url }}" placeholder="openai_compatible 时填写，例如 https://api.deepseek.com">
+            </label>
+          </div>
+          <div class="admin-form-grid">
+            {% for field in providers.model_fields %}
+            <label>{{ field.label }}
+              <input name="model_{{ field.name }}" value="{{ field.value }}" required>
+            </label>
+            {% endfor %}
+          </div>
+          <label>生成作者
+            <input name="authors" value="{{ providers.authors|join(', ') }}" placeholder="例如 kimi, glm, session；留空则全部用会话模型">
+          </label>
+          <button class="primary-button" type="submit">保存模型和作者</button>
+        </form>
+      </div>
+
+      <div class="login-card admin-card">
+        <small>生成端点</small>
+        <h2>新增或修改命名模型</h2>
+        <p>端点名出现在作者列表里时，生成阶段会走这个 OpenAI 兼容接口。并发默认 1；0 表示不限制。</p>
+        {% if providers.endpoints %}
+        <ul class="admin-endpoint-list">
+          {% for endpoint in providers.endpoints %}
+          <li>
+            <div>
+              <strong>{{ endpoint.name }}</strong>
+              <span>{{ endpoint.model }} · {{ endpoint.api_key_env }} · 并发 {{ endpoint.max_concurrent }}</span>
+              <small>{{ endpoint.base_url }}</small>
+            </div>
+            <form method="post" action="/admin/providers/endpoints/{{ endpoint.name }}/delete">
+              <button class="secondary-button" type="submit">删除</button>
+            </form>
+          </li>
+          {% endfor %}
+        </ul>
+        {% else %}
+        <p class="admin-empty">还没有命名端点。当前生成会使用会话模型。</p>
+        {% endif %}
+        <form method="post" action="/admin/providers/endpoints" autocomplete="off">
+          <div class="admin-form-grid">
+            <label>端点名
+              <input name="name" required placeholder="kimi">
+            </label>
+            <label>模型名
+              <input name="model" required placeholder="kimi-k3.1-pro">
+            </label>
+            <label>接口地址
+              <input name="base_url" required placeholder="https://api.moonshot.cn/v1">
+            </label>
+            <label>密钥环境变量
+              <input name="api_key_env" required placeholder="KIMI_API_KEY">
+            </label>
+            <label>最大并发
+              <input name="max_concurrent" type="number" min="0" max="32" value="1">
+            </label>
+            <label>同时写入密钥（可选）
+              <input name="api_key" type="password" autocomplete="new-password" placeholder="留空则只改端点，不改钥匙">
+            </label>
+          </div>
+          <button class="primary-button" type="submit">保存端点</button>
+        </form>
+      </div>
+    </section>
     {% endif %}
   </main>
 </body>
